@@ -72,7 +72,7 @@ say "Done"
 cat <<'MSG'
     - The dot is in your menu bar. If you can't see it (a notch can hide icons),
       quit some menu bar apps, then hold ⌘ and drag the dot next to the clock.
-    - Claude Code sessions that are already open need a restart to pick up the hooks.
+    - Open Claude Code sessions pick up the hooks on their next prompt (restart one if it never shows up).
     - First click on a VS Code session: VS Code asks to allow blink to open a
       link; tick "Don't ask again". First Terminal.app click: allow "control Terminal".
 MSG

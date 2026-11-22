@@ -41,7 +41,8 @@ The installer:
 
 Then:
 
-- **Restart open Claude Code sessions.** Hooks load when a session starts.
+- Open Claude Code sessions pick up the hooks on their next prompt. If one
+  never shows up, restart it.
 - **Find the dot.** On a MacBook with a notch, macOS hides menu bar icons that
   don't fit. Hold ⌘ and drag the dot next to the clock; macOS remembers
   where you put it.

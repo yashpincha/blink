@@ -17,4 +17,4 @@ tccutil reset Accessibility com.yashpincha.blink >/dev/null 2>&1
 tccutil reset AppleEvents com.yashpincha.blink >/dev/null 2>&1
 defaults delete com.yashpincha.blink >/dev/null 2>&1
 [ "${1:-}" = "--keep-cert" ] || security delete-identity -c blink >/dev/null 2>&1
-echo "blink removed. Open Claude Code sessions keep their hooks until restarted."
+echo "blink removed."

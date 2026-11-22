@@ -53,10 +53,10 @@ cp hooks/hook.sh "$DATA/hook.sh"
 chmod +x "$DATA/hook.sh"
 mkdir -p "$(dirname "$SETTINGS")"
 [ -s "$SETTINGS" ] || echo '{}' > "$SETTINGS"
-cp "$SETTINGS" "$SETTINGS.bak-blink"
+[ -f "$SETTINGS.bak-blink" ] || cp "$SETTINGS" "$SETTINGS.bak-blink"  # keep the pre-blink original
 jq -f scripts/hooks-add.jq "$SETTINGS" > "$SETTINGS.tmp-blink"
 mv "$SETTINGS.tmp-blink" "$SETTINGS"
-echo "    $SETTINGS (backup: settings.json.bak-blink)"
+echo "    $SETTINGS (original saved as settings.json.bak-blink)"
 
 # 4. The VS Code helper that focuses the exact terminal tab.
 if command -v code >/dev/null; then

@@ -8,8 +8,8 @@ SETTINGS="$HOME/.claude/settings.json"
 pkill -x blink 2>/dev/null
 [ -x "$APP/Contents/MacOS/blink" ] && "$APP/Contents/MacOS/blink" --unregister-login
 if [ -f "$SETTINGS" ] && command -v jq >/dev/null; then
-  cp "$SETTINGS" "$SETTINGS.bak-blink"
-  jq -f scripts/hooks-remove.jq "$SETTINGS" > "$SETTINGS.tmp-blink" && mv "$SETTINGS.tmp-blink" "$SETTINGS"
+  jq -f scripts/hooks-remove.jq "$SETTINGS" > "$SETTINGS.tmp-blink" && mv "$SETTINGS.tmp-blink" "$SETTINGS" \
+    && rm -f "$SETTINGS.bak-blink"
 fi
 rm -rf "$APP" "$HOME/.claude/blink"
 command -v code >/dev/null && code --uninstall-extension yashpincha.blink >/dev/null 2>&1

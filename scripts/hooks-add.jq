@@ -11,6 +11,7 @@ def wanted: {
                      {matcher: "idle_prompt", hooks: [cmd("idle")]}],
   PreToolUse:       [{matcher: "AskUserQuestion", hooks: [cmd("needs")]}],
   PostToolUse:      [{hooks: [cmd("tool")]}],
+  PostToolUseFailure: [{hooks: [cmd("interrupt")]}],
   SessionEnd:       [{hooks: [cmd("end")]}]
 };
 .hooks = (.hooks // {})

@@ -3,9 +3,7 @@
 A tiny dot in your Mac's menu bar that tells you when Claude Code sessions are
 done, and takes you to them.
 
-- The dot has a face: asleep when nothing's going on, eyes open while Claude
-  works, happy with a count (`2`) when sessions are done, wide-eyed when a
-  session needs you.
+- `○` nothing waiting · `● 2` two sessions done · `◐` a session needs you
 - When a session finishes or needs you (a permission prompt or a question), a
   small card drops down under the dot for a few seconds. It's silent, and it
   doesn't steal focus.
@@ -73,6 +71,7 @@ Claude Code ──hooks──▶ ~/.claude/blink/sessions/<id>.state ──watch
 | `Notification` (`permission_prompt`, `elicitation_*`, `agent_needs_input`), `PreToolUse` `AskUserQuestion` | `needs` |
 | `PostToolUse` | `running` again, but only when leaving `needs` |
 | `Notification` `idle_prompt` | `idle`, which clears a stale state after you interrupt Claude |
+| `PostToolUseFailure` | `idle` when you interrupt Claude mid-tool (Esc), since no `Stop` follows |
 | `SessionEnd` | deletes the file |
 
 The hooks run `async`, so Claude never waits on them. The hook is a short

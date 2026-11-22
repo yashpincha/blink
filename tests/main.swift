@@ -46,7 +46,7 @@ let waiting = parseSession(
     mtime: t0)
 check(waiting?.state == .running && waiting?.agents == 2 && waiting?.message == "",
       "stopped with background agents: running, 2 agents (shell not counted)")
-check(dot(for: [waiting!]) == .working, "waiting on agents: dot is working")
+check(dot(for: [waiting!]) == .empty, "waiting on agents: not done yet")
 check(parseSession(id: "x", contents: file("bogus\t1"), mtime: t0) == nil, "unknown state rejected")
 check(parseSession(id: "x", contents: Data(), mtime: t0) == nil, "empty file rejected")
 
@@ -79,9 +79,8 @@ check(summaryLine([s("1", .done), s("2", .done), s("3", .running), s("4", .needs
       == "2 done · 1 running · 1 needs you", "summary line")
 check(summaryLine([s("1", .idle)]) == "No active sessions", "idle not counted")
 
-check(dot(for: []) == .asleep, "nothing → asleep")
-check(dot(for: [s("1", .idle)]) == .asleep, "idle only → asleep")
-check(dot(for: [s("1", .running)]) == .working, "running only → working")
+check(dot(for: []) == .empty, "empty dot")
+check(dot(for: [s("1", .running)]) == .empty, "running only → hollow")
 check(dot(for: [s("1", .done), s("2", .done), s("3", .running)]) == .done(2), "done count")
 check(dot(for: [s("1", .done), s("2", .needs)]) == .needs, "needs wins")
 

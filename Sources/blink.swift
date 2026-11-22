@@ -157,15 +157,12 @@ func stateWord(_ s: SessionState) -> String {
     }
 }
 
-/// The dot's mood: asleep (nothing going on), working (Claude is running),
-/// done (with a count), or needs you. Needs you wins, then done.
-enum Dot: Equatable { case asleep, working, done(Int), needs }
+enum Dot: Equatable { case empty, done(Int), needs }
 
 func dot(for sessions: [Session]) -> Dot {
     if sessions.contains(where: { $0.state == .needs }) { return .needs }
     let done = sessions.filter { $0.state == .done }.count
-    if done > 0 { return .done(done) }
-    return sessions.contains(where: { $0.state == .running }) ? .working : .asleep
+    return done > 0 ? .done(done) : .empty
 }
 
 /// Sessions that just became done or need you. Each one gets a card.
@@ -657,35 +654,29 @@ private func makeLabel(_ text: String, size: CGFloat, weight: NSFont.Weight = .r
     return l
 }
 
-/// The dot has a face, one per mood. Monochrome template images, so macOS
-/// tints them for the menu bar; drawn once, then cached.
-///   asleep  ring, closed eyes     working  ring, open eyes
-///   done    disc, happy eyes      needs    disc, wide eyes
+/// Menu bar images: ○ nothing waiting, ● done, ◐ needs you. A 15 pt circle
+/// in an 18 pt icon. Template images, so macOS tints them for the menu bar;
+/// drawn once, then cached.
 enum DotImage {
     static let size: CGFloat = 18
 
-    private static func make(_ mood: Dot) -> NSImage {
+    private static func make(_ dot: Dot) -> NSImage {
         let img = NSImage(size: NSSize(width: size, height: size), flipped: false) { _ in
-            guard let cg = NSGraphicsContext.current?.cgContext else { return false }
-            let head = NSRect(x: 2, y: 2, width: 14, height: 14)
+            let c = NSRect(x: 1.5, y: 1.5, width: 15, height: 15)
+            let ring = NSBezierPath(ovalIn: c.insetBy(dx: 0.8, dy: 0.8))
+            ring.lineWidth = 1.6
             NSColor.black.set()
-            switch mood {
-            case .asleep, .working:
-                let ring = NSBezierPath(ovalIn: head.insetBy(dx: 0.75, dy: 0.75))
-                ring.lineWidth = 1.5
+            switch dot {
+            case .done:
+                NSBezierPath(ovalIn: c).fill()
+            case .needs:
                 ring.stroke()
-            case .done, .needs:
-                NSBezierPath(ovalIn: head).fill()
-                cg.setBlendMode(.clear)  // eyes are cut out of the disc
-            }
-            let eyes: [CGFloat] = [6.5, 11.5], y: CGFloat = 9.3
-            for x in eyes {
-                switch mood {
-                case .asleep: lid(x < 9 ? x - 0.4 : x + 0.4, y, curve: -1.3, half: 1.35).stroke()  // ‿ closed
-                case .done: lid(x, y - 0.7, curve: 1.6).stroke()      // ^ happy
-                case .working: NSBezierPath(ovalIn: NSRect(x: x - 1, y: y - 1.4, width: 2, height: 2.8)).fill()
-                case .needs: NSBezierPath(ovalIn: NSRect(x: x - 1.55, y: y - 1.55, width: 3.1, height: 3.1)).fill()
-                }
+                NSGraphicsContext.saveGraphicsState()
+                NSRect(x: c.minX, y: c.minY, width: c.width / 2, height: c.height).clip()
+                NSBezierPath(ovalIn: c).fill()
+                NSGraphicsContext.restoreGraphicsState()
+            case .empty:
+                ring.stroke()
             }
             return true
         }
@@ -693,17 +684,7 @@ enum DotImage {
         return img
     }
 
-    private static func lid(_ x: CGFloat, _ y: CGFloat, curve: CGFloat, half: CGFloat = 1.6) -> NSBezierPath {
-        let p = NSBezierPath()
-        p.move(to: NSPoint(x: x - half, y: y))
-        p.curve(to: NSPoint(x: x + half, y: y), controlPoint1: NSPoint(x: x - 0.9, y: y + curve),
-                controlPoint2: NSPoint(x: x + 0.9, y: y + curve))
-        p.lineWidth = 1.4
-        p.lineCapStyle = .round
-        return p
-    }
-
-    static let asleep = make(.asleep), working = make(.working), done = make(.done(0)), needs = make(.needs)
+    static let empty = make(.empty), done = make(.done(0)), needs = make(.needs)
 }
 
 final class GlyphView: NSView {
@@ -1245,15 +1226,15 @@ func panelRows(_ sessions: [String: Session], card: [String]?, now: Date,
                                     bottom: ordered.isEmpty ? 7 : 3)]
     if !ordered.isEmpty {
         let sessionRows = ordered.prefix(50).map { row($0, pulse: true, lines: 1) }
-        rows.append(ScrollingList(sessionRows, width: DropPanel.width - 10, visible: 3))
+        rows.append(ScrollingList(sessionRows, width: DropPanel.width - 10, visible: 4))
     }
     return rows
 }
 
-/// The four faces on a menu-bar-colored strip: real size (2x pixels) on top,
+/// The three dots on a menu-bar-colored strip: real size (2x pixels) on top,
 /// zoomed below. Writes dots-light.png and dots-dark.png.
 private func renderDotPreviews(to dir: String) {
-    let faces: [(NSImage, String)] = [(DotImage.asleep, ""), (DotImage.working, ""), (DotImage.done, " 2"), (DotImage.needs, "")]
+    let faces: [(NSImage, String)] = [(DotImage.empty, ""), (DotImage.done, " 2"), (DotImage.needs, "")]
     for (look, bar, ink) in [("light", NSColor(hex: 0xECECEC), NSColor.black), ("dark", NSColor(hex: 0x262626), NSColor.white)] {
         let zoom: CGFloat = 6, scale: CGFloat = 2, gap: CGFloat = 44
         let size = NSSize(width: gap * 4 + 24, height: 44 + DotImage.size * zoom + 24)
@@ -1274,9 +1255,9 @@ private func renderDotPreviews(to dir: String) {
             }
             let x = 12 + CGFloat(i) * gap
             tinted.draw(in: NSRect(x: x, y: size.height - 13 - DotImage.size, width: DotImage.size, height: DotImage.size))
-            NSAttributedString(string: title, attributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium),
+            NSAttributedString(string: title, attributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .medium),
                                                            .foregroundColor: ink])
-                .draw(at: NSPoint(x: x + DotImage.size, y: size.height - 13 - DotImage.size + 2))
+                .draw(at: NSPoint(x: x + DotImage.size, y: size.height - 13 - DotImage.size + 1))
             let zx = 12 + CGFloat(i) * (DotImage.size * zoom + 0) * 0.0 + CGFloat(i) * gap
             tinted.draw(in: NSRect(x: zx, y: 12, width: DotImage.size * zoom * 0.4, height: DotImage.size * zoom * 0.4))
         }
@@ -1406,7 +1387,7 @@ final class Controller: NSObject {
         item.behavior = []
         if let b = item.button {
             b.imagePosition = .imageLeft
-            b.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+            b.font = .monospacedDigitSystemFont(ofSize: 13, weight: .medium)
             b.target = self
             b.action = #selector(dotClicked)
             b.sendAction(on: [.leftMouseUp, .rightMouseUp])
@@ -1444,8 +1425,7 @@ final class Controller: NSObject {
         guard let b = item.button else { return }
         let all = Array(store.sessions.values)
         switch dot(for: all) {
-        case .asleep: b.image = DotImage.asleep; b.title = ""
-        case .working: b.image = DotImage.working; b.title = ""
+        case .empty: b.image = DotImage.empty; b.title = ""
         case .needs: b.image = DotImage.needs; b.title = ""
         case .done(let n): b.image = DotImage.done; b.title = " \(n)"
         }

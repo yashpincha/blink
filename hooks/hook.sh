@@ -10,6 +10,7 @@
 #   hook.sh tool      PostToolUse                      only used to leave "needs"
 #   hook.sh idle      Notification idle_prompt         clears a stale state after an interrupt
 #                                                      (never while agents still work)
+#   hook.sh interrupt PostToolUseFailure               you pressed Esc mid-tool: no Stop follows
 #   hook.sh end       SessionEnd                       forget the session
 #
 # File format: one tab-separated metadata line, then the event's JSON payload.
@@ -23,13 +24,16 @@ case $1 in
   end)
     rm -f "$f" "$dir/$sid.first"
     exit 0 ;;
-  tool|idle)
+  tool|idle|interrupt)
     # Cheap guard (shell builtins only): most tool calls don't change anything.
     [ -f "$f" ] || exit 0
     IFS= read -r head < "$f"
     case "$1:$head" in
       tool:needs*) state=running ;;
       idle:running*|idle:needs*) state=idle ;;
+      interrupt:running*|interrupt:needs*)
+        # A failed tool only ends the turn when you interrupted it.
+        case $(cat) in *'"is_interrupt":true'*) state=idle ;; *) exit 0 ;; esac ;;
       *) exit 0 ;;
     esac ;;
   done)

@@ -45,6 +45,15 @@ run done '{"last_assistant_message":"Server up.","background_tasks":[{"id":"b1",
 ok 'head1 | grep -q "^done	"' "background shell only: done"
 run done '{"last_assistant_message":"All agents back.","background_tasks":[]}'
 ok 'head1 | grep -q "^done	" && grep -q "All agents back." "$D/s1.state"' "agents finished: done"
+
+run running '{"prompt":"run the tests"}'
+run interrupt '{"tool_name":"Bash","error":"exit 1","is_interrupt":false}'
+ok 'head1 | grep -q "^running	"' "tool error without interrupt: still running"
+run interrupt '{"tool_name":"Bash","error":"Interrupted","is_interrupt":true}'
+ok 'head1 | grep -q "^idle	"' "Esc mid-tool: idle"
+run done '{"last_assistant_message":"Done."}'
+run interrupt '{"tool_name":"Bash","is_interrupt":true}'
+ok 'head1 | grep -q "^done	"' "interrupt never touches done"
 run tool '{}'
 ok 'head1 | grep -q "^done	"' "tool keeps done"
 

@@ -91,18 +91,31 @@ func parseLabel(_ contents: Data) -> String {
     snippet(splitFile(contents)?.payload["prompt"] as? String ?? "", max: 40)
 }
 
-/// First meaningful line of some markdown-ish text, without the markup.
+/// The most telling line of a markdown-ish message, without the markup. Skips
+/// headings, code blocks, tables and rules; a short opener like "Done." or
+/// "Here's what changed:" borrows the line after it.
 func snippet(_ text: String, max: Int = 160) -> String {
-    for raw in text.split(whereSeparator: \.isNewline) {
+    func clean(_ raw: Substring) -> String {
         var line = raw.replacingOccurrences(of: "**", with: "").replacingOccurrences(of: "`", with: "")
         line = line.trimmingCharacters(in: .whitespaces)
         while let c = line.first, "#>*-".contains(c) { line.removeFirst() }
-        line = line.trimmingCharacters(in: .whitespaces)
-        if line.isEmpty { continue }
-        if line.count > max { line = String(line.prefix(max - 1)).trimmingCharacters(in: .whitespaces) + "…" }
-        return line
+        return line.trimmingCharacters(in: .whitespaces)
     }
-    return ""
+    var heading = "", picked: [String] = [], inCode = false
+    for raw in text.split(whereSeparator: \.isNewline) {
+        let t = raw.trimmingCharacters(in: .whitespaces)
+        if t.hasPrefix("```") { inCode.toggle(); continue }
+        if inCode || t.hasPrefix("|") || t.allSatisfy({ "-=*_ ".contains($0) }) { continue }
+        let line = clean(raw)
+        if line.isEmpty { continue }
+        if t.hasPrefix("#") { if heading.isEmpty { heading = line }; continue }
+        picked.append(line)
+        let opener = line.count < 28 && [".", "!", ":"].contains(line.last ?? " ")
+        if picked.count == 2 || !opener { break }
+    }
+    var out = picked.isEmpty ? heading : picked.joined(separator: " ")
+    if out.count > max { out = String(out.prefix(max - 1)).trimmingCharacters(in: .whitespaces) + "…" }
+    return out
 }
 
 func summaryLine(_ sessions: [Session]) -> String {
@@ -111,7 +124,7 @@ func summaryLine(_ sessions: [Session]) -> String {
     if count(.done) > 0 { parts.append("\(count(.done)) done") }
     if count(.running) > 0 { parts.append("\(count(.running)) running") }
     if count(.needs) > 0 { parts.append("\(count(.needs)) needs you") }
-    return parts.isEmpty ? "No sessions" : parts.joined(separator: " · ")
+    return parts.isEmpty ? "No active sessions" : parts.joined(separator: " · ")
 }
 
 func ago(_ date: Date, now: Date = Date()) -> String {
@@ -541,6 +554,7 @@ enum Palette {
     static let text = pair(0x0A0A0A, 0xF5F5F5)
     static let secondary = pair(0x737373, 0x9B9B9B)
     static let hover = pair(0xF4F4F4, 0x232323)
+    static let pressed = pair(0xEBEBEB, 0x2B2B2B)
 }
 
 private func makeLabel(_ text: String, size: CGFloat, weight: NSFont.Weight = .regular,
@@ -591,7 +605,7 @@ final class GlyphView: NSView {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
-        if pulse && state == .running {
+        if pulse && state == .running && !Motion.reduced {
             let a = CABasicAnimation(keyPath: "opacity")
             a.fromValue = 1
             a.toValue = 0.3
@@ -628,27 +642,77 @@ final class GlyphView: NSView {
     }
 }
 
-final class FirstClickButton: NSButton {
+class FirstClickButton: NSButton {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
-/// One session: glyph, title, "done · 4m", and a one-line snippet underneath.
+/// Respect System Settings → Accessibility → Display → Reduce motion.
+enum Motion {
+    static var reduced: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+    static let easeOut = CAMediaTimingFunction(controlPoints: 0.16, 1, 0.3, 1)
+}
+
+/// A quiet text link ("Clear done") that darkens on hover.
+final class TextButton: FirstClickButton {
+    var onPress: (() -> Void)?
+    private let text: String
+
+    init(_ text: String) {
+        self.text = text
+        super.init(frame: .zero)
+        isBordered = false
+        translatesAutoresizingMaskIntoConstraints = false
+        target = self
+        action = #selector(pressed)
+        setAccessibilityLabel(text)
+        style(hover: false)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    @objc private func pressed() { onPress?() }
+
+    private func style(hover: Bool) {
+        attributedTitle = NSAttributedString(string: text, attributes: [
+            .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+            .foregroundColor: hover ? Palette.text : Palette.secondary,
+        ])
+    }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                       owner: self))
+    }
+    override func mouseEntered(with event: NSEvent) { style(hover: true) }
+    override func mouseExited(with event: NSEvent) { style(hover: false) }
+}
+
+/// One session: glyph, folder, "done · 4m", and what Claude said.
 final class RowView: NSView {
     var onClick: (() -> Void)?
     var onDismiss: (() -> Void)?
+    private let session: Session
+    private let detailText: String
     private let time: NSTextField
     private var close: FirstClickButton?
     private var hovering = false {
         didSet {
-            needsDisplay = true
+            guard hovering != oldValue else { return }
             close?.isHidden = !hovering
             time.isHidden = hovering && close != nil
+            if !hovering { pressed = false }
+            paint(animated: true)
         }
     }
+    private var pressed = false {
+        didSet { if pressed != oldValue { paint(animated: true) } }
+    }
 
-    init(_ s: Session, label: String, now: Date, pulse: Bool) {
-        time = makeLabel("\(stateWord(s.state)) · \(ago(s.since, now: now))", size: 11.5,
-                         color: Palette.secondary, digits: true)
+    /// `lines`: how many lines of Claude's message to show (the card shows 2).
+    init(_ s: Session, label: String, now: Date, pulse: Bool, lines: Int = 1) {
+        session = s
+        detailText = s.state == .running ? "" : s.message
+        time = makeLabel(Self.timeText(s, now), size: 11.5, color: Palette.secondary, digits: true)
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
@@ -683,11 +747,17 @@ final class RowView: NSView {
             time.firstBaselineAnchor.constraint(equalTo: name.firstBaselineAnchor),
         ]
 
-        let detailText = s.state == .running ? "" : s.message
         if detailText.isEmpty {
             constraints.append(name.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8))
         } else {
             let detail = makeLabel(detailText, size: 12, color: Palette.secondary)
+            if lines > 1 {
+                detail.maximumNumberOfLines = lines
+                detail.cell?.wraps = true
+                detail.cell?.truncatesLastVisibleLine = true
+                detail.lineBreakMode = .byWordWrapping
+                detail.preferredMaxLayoutWidth = DropPanel.width - 10 - 30 - 11
+            }
             detail.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             addSubview(detail)
             constraints += [
@@ -707,6 +777,7 @@ final class RowView: NSView {
             b.target = self
             b.action = #selector(dismissTapped)
             b.isHidden = true
+            b.toolTip = "Dismiss"
             b.translatesAutoresizingMaskIntoConstraints = false
             addSubview(b)
             constraints += [
@@ -718,15 +789,51 @@ final class RowView: NSView {
             close = b
         }
         NSLayoutConstraint.activate(constraints)
+
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        describe(now: now)
     }
     required init?(coder: NSCoder) { fatalError() }
 
+    private static func timeText(_ s: Session, _ now: Date) -> String {
+        "\(stateWord(s.state)) · \(ago(s.since, now: now))"
+    }
+
+    /// Updates "running · 12m" in place (no rebuild, so hover state survives).
+    func refresh(now: Date) {
+        time.stringValue = Self.timeText(session, now)
+        describe(now: now)
+    }
+
+    private func describe(now: Date) {
+        let when = ago(session.since, now: now)
+        var text = "\(session.folder), \(stateWord(session.state))" + (when == "now" ? "" : ", \(when) ago")
+        if !detailText.isEmpty { text += ". \(detailText)" }
+        setAccessibilityLabel(text)
+    }
+
     @objc private func dismissTapped() { onDismiss?() }
 
-    override var wantsUpdateLayer: Bool { true }
-    override func updateLayer() {
-        layer?.backgroundColor = hovering ? Palette.hover.cgColor : NSColor.clear.cgColor
+    /// Hover and press tints fade rather than snap.
+    private func paint(animated: Bool) {
+        guard let layer else { return }
+        var color = NSColor.clear.cgColor
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            if pressed { color = Palette.pressed.cgColor } else if hovering { color = Palette.hover.cgColor }
+        }
+        if animated && !Motion.reduced {
+            let a = CABasicAnimation(keyPath: "backgroundColor")
+            a.fromValue = layer.presentation()?.backgroundColor ?? layer.backgroundColor
+            a.toValue = color
+            a.duration = pressed ? 0.06 : 0.14
+            layer.add(a, forKey: "tint")
+        }
+        layer.backgroundColor = color
     }
+
+    override var wantsUpdateLayer: Bool { true }
+    override func updateLayer() { paint(animated: false) }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -737,9 +844,16 @@ final class RowView: NSView {
     override func mouseEntered(with event: NSEvent) { hovering = true }
     override func mouseExited(with event: NSEvent) { hovering = false }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-    override func mouseDown(with event: NSEvent) {}
+    private func inside(_ e: NSEvent) -> Bool { bounds.contains(convert(e.locationInWindow, from: nil)) }
+    override func mouseDown(with event: NSEvent) { pressed = true }
+    override func mouseDragged(with event: NSEvent) { pressed = inside(event) }
     override func mouseUp(with event: NSEvent) {
-        if bounds.contains(convert(event.locationInWindow, from: nil)) { onClick?() }
+        pressed = false
+        if inside(event) { onClick?() }
+    }
+    override func accessibilityPerformPress() -> Bool {
+        onClick?()
+        return true
     }
 }
 
@@ -810,33 +924,43 @@ final class DropPanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 
-    func setRows(_ rows: [NSView]) {
+    /// Swaps in new content and sizes the panel to fit, centered under `anchor`
+    /// (the dot) just below the menu bar. Height changes glide while visible.
+    func update(_ rows: [NSView], under anchor: NSWindow?, animate: Bool) {
         // Keep the scroll position when the list refreshes under you.
         let scrolled = stack.arrangedSubviews.compactMap { $0 as? ScrollingList }.first?.contentView.bounds.origin.y
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        defer {
-            if let y = scrolled, let list = rows.compactMap({ $0 as? ScrollingList }).first { list.scroll(toY: y) }
-        }
         for r in rows {
             stack.addArrangedSubview(r)
             r.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -10).isActive = true
         }
         stack.layoutSubtreeIfNeeded()
-        var f = frame
+        if let y = scrolled, let list = rows.compactMap({ $0 as? ScrollingList }).first { list.scroll(toY: y) }
+
         let h = ceil(stack.fittingSize.height)
-        f.origin.y += f.height - h  // keep the top edge in place
-        f.size = NSSize(width: Self.width, height: h)
-        setFrame(f, display: true)
+        var target = NSRect(x: frame.minX, y: frame.maxY - h, width: Self.width, height: h)
+        if let anchor, let screen = anchor.screen ?? NSScreen.main {
+            let vf = screen.visibleFrame
+            let x = min(max(anchor.frame.midX - Self.width / 2, vf.minX + 8), vf.maxX - Self.width - 8)
+            target.origin = NSPoint(x: round(x), y: vf.maxY - 6 - h)
+        }
+        if animate && isVisible && !Motion.reduced && target.height != frame.height {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.2
+                ctx.timingFunction = Motion.easeOut
+                animator().setFrame(target, display: true)
+            }
+        } else {
+            setFrame(target, display: true)
+        }
         invalidateShadow()
     }
 
-    /// Centers the panel under the status item, just below the menu bar.
-    func place(under button: NSStatusBarButton) {
-        guard let item = button.window, let screen = item.screen ?? NSScreen.main else { return }
-        let vf = screen.visibleFrame
-        var x = item.frame.midX - frame.width / 2
-        x = min(max(x, vf.minX + 8), vf.maxX - frame.width - 8)
-        setFrameOrigin(NSPoint(x: x, y: vf.maxY - 6 - frame.height))
+    func refreshTimes(_ now: Date) {
+        func walk(_ v: NSView) {
+            if let r = v as? RowView { r.refresh(now: now) } else { v.subviews.forEach(walk) }
+        }
+        walk(card)
     }
 }
 
@@ -932,52 +1056,94 @@ final class ScrollingList: NSScrollView {
     }
 }
 
-/// Text rows inside the panel: the summary header.
-private func textRow(_ text: String, top: CGFloat, bottom: CGFloat) -> NSView {
+/// The panel's header: "2 done · 1 running", plus "Clear done" when useful.
+private func headerRow(_ text: String, onClear: (() -> Void)?, bottom: CGFloat) -> NSView {
     let v = NSView()
     v.translatesAutoresizingMaskIntoConstraints = false
     let l = makeLabel(text, size: 12, color: Palette.secondary)
     v.addSubview(l)
-    NSLayoutConstraint.activate([
+    var constraints = [
         l.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 11),
-        l.trailingAnchor.constraint(lessThanOrEqualTo: v.trailingAnchor, constant: -11),
-        l.topAnchor.constraint(equalTo: v.topAnchor, constant: top),
+        l.topAnchor.constraint(equalTo: v.topAnchor, constant: 7),
         l.bottomAnchor.constraint(equalTo: v.bottomAnchor, constant: -bottom),
+    ]
+    if let onClear {
+        let b = TextButton("Clear done")
+        b.onPress = onClear
+        v.addSubview(b)
+        constraints += [
+            b.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -11),
+            b.firstBaselineAnchor.constraint(equalTo: l.firstBaselineAnchor),
+            l.trailingAnchor.constraint(lessThanOrEqualTo: b.leadingAnchor, constant: -8),
+        ]
+    } else {
+        constraints.append(l.trailingAnchor.constraint(lessThanOrEqualTo: v.trailingAnchor, constant: -11))
+    }
+    NSLayoutConstraint.activate(constraints)
+    return v
+}
+
+/// A plain message (the first-run hint).
+func messageRow(_ title: String, _ detail: String) -> NSView {
+    let v = NSView()
+    v.translatesAutoresizingMaskIntoConstraints = false
+    let t = makeLabel(title, size: 13, weight: .medium, color: Palette.text)
+    let d = makeLabel(detail, size: 12, color: Palette.secondary)
+    d.maximumNumberOfLines = 3
+    d.cell?.wraps = true
+    d.lineBreakMode = .byWordWrapping
+    d.preferredMaxLayoutWidth = DropPanel.width - 10 - 22
+    v.addSubview(t)
+    v.addSubview(d)
+    NSLayoutConstraint.activate([
+        t.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 11),
+        t.topAnchor.constraint(equalTo: v.topAnchor, constant: 9),
+        t.trailingAnchor.constraint(lessThanOrEqualTo: v.trailingAnchor, constant: -11),
+        d.leadingAnchor.constraint(equalTo: t.leadingAnchor),
+        d.trailingAnchor.constraint(lessThanOrEqualTo: v.trailingAnchor, constant: -11),
+        d.topAnchor.constraint(equalTo: t.bottomAnchor, constant: 3),
+        d.bottomAnchor.constraint(equalTo: v.bottomAnchor, constant: -9),
     ])
     return v
 }
 
+let firstRunHint = ("blink is running",
+                    "Hover the dot to see your Claude Code sessions. Hold ⌘ and drag it to move it.")
+
 /// Rows for the card (`card` = the session ids to show) or, with `card: nil`,
 /// the full summary panel.
 func panelRows(_ sessions: [String: Session], card: [String]?, now: Date,
-               onOpen: @escaping (Session) -> Void, onDismiss: @escaping (Session) -> Void) -> [NSView] {
+               onOpen: @escaping (Session) -> Void, onDismiss: @escaping (Session) -> Void,
+               onClearDone: (() -> Void)? = nil, paused: Bool = false) -> [NSView] {
     let all = Array(sessions.values)
     let ordered = panelOrder(all)
     let labels = rowLabels(ordered)
-    func row(_ s: Session, pulse: Bool) -> RowView {
-        let r = RowView(s, label: labels[s.id] ?? "", now: now, pulse: pulse)
+    func row(_ s: Session, pulse: Bool, lines: Int) -> RowView {
+        let r = RowView(s, label: labels[s.id] ?? "", now: now, pulse: pulse, lines: lines)
         r.onClick = { onOpen(s) }
         r.onDismiss = { onDismiss(s) }
         return r
     }
     if let card {
-        return card.compactMap { sessions[$0] }.map { row($0, pulse: false) }
+        return card.compactMap { sessions[$0] }.map { row($0, pulse: false, lines: 2) }
     }
-    var rows: [NSView] = [textRow(summaryLine(all), top: 7, bottom: ordered.isEmpty ? 7 : 3)]
+    let anyDone = ordered.contains { $0.state == .done }
+    var rows: [NSView] = [headerRow(summaryLine(all) + (paused ? " · paused" : ""), onClear: anyDone ? onClearDone : nil,
+                                    bottom: ordered.isEmpty ? 7 : 3)]
     if !ordered.isEmpty {
-        let sessionRows = ordered.prefix(50).map { row($0, pulse: true) }
+        let sessionRows = ordered.prefix(50).map { row($0, pulse: true, lines: 1) }
         rows.append(ScrollingList(sessionRows, width: DropPanel.width - 10, visible: 3))
     }
     return rows
 }
 
-/// Developer aid: `blink --preview <dir>` renders the card and the panel,
-/// light and dark, to PNGs (no screen-recording permission needed).
+/// Developer aid: `blink --preview <dir>` renders the card, the panel and
+/// the first-run hint, light and dark, to PNGs (no screen recording needed).
 func renderPreviews(to dir: String) {
     let now = Date()
     let sample = [
         Session(id: "1", state: .done, projectDir: "/x/proj",
-                message: "Done. The cosine schedule with warmup beats step decay by 1.8% on val loss.",
+                message: snippet("## Summary\n\nDone.\nThe cosine schedule with warmup beats step decay by 1.8% on val loss, so I made it the default."),
                 since: now.addingTimeInterval(-240)),
         Session(id: "2", state: .needs, projectDir: "/x/repo",
                 message: "Claude needs your permission to use Bash", since: now.addingTimeInterval(-30)),
@@ -989,11 +1155,16 @@ func renderPreviews(to dir: String) {
                 since: now.addingTimeInterval(-3 * 3600)),
     ]
     let sessions = Dictionary(uniqueKeysWithValues: sample.map { ($0.id, $0) })
+    let kinds: [(String, () -> [NSView])] = [
+        ("card", { panelRows(sessions, card: ["1", "2"], now: now, onOpen: { _ in }, onDismiss: { _ in }) }),
+        ("panel", { panelRows(sessions, card: nil, now: now, onOpen: { _ in }, onDismiss: { _ in }, onClearDone: {}) }),
+        ("hint", { [messageRow(firstRunHint.0, firstRunHint.1)] }),
+    ]
     for (look, name) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
-        for (kind, card) in [("card", ["1", "2"] as [String]?), ("panel", nil)] {
+        for (kind, rows) in kinds {
             let panel = DropPanel()
             panel.appearance = NSAppearance(named: name)
-            panel.setRows(panelRows(sessions, card: card, now: now, onOpen: { _ in }, onDismiss: { _ in }))
+            panel.update(rows(), under: nil, animate: false)
             panel.setFrameOrigin(NSPoint(x: -10000, y: -10000))
             panel.orderFrontRegardless()
             panel.displayIfNeeded()
@@ -1039,22 +1210,44 @@ enum Prefs {
 // MARK: - App
 
 final class Controller: NSObject {
-    private enum Mode { case hidden, card, summary }
+    private enum Mode { case hidden, card, summary, hint }
 
     private let store: Store
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let panel = DropPanel()
     private var mode = Mode.hidden
-    private var pinned = false
     private var overDot = false
     private var overPanel = false
     private var cardIds: [String] = []
     private var hideWork: DispatchWorkItem?
+    private var hoverWork: DispatchWorkItem?
     private var ticker: Timer?
     private var mouseMonitor: Any?
+    private var clickMonitor: Any?
+
+    /// Pinned by a click: stays open with the dot highlighted, and a click
+    /// anywhere else closes it, like a menu. The click watcher exists only
+    /// while pinned.
+    private var pinned = false {
+        didSet {
+            guard pinned != oldValue else { return }
+            item.button?.highlight(pinned)
+            if pinned {
+                clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+                    guard let self, !self.mouseOnDot else { return }  // the dot toggles itself
+                    self.pinned = false
+                    self.hide()
+                }
+            } else if let m = clickMonitor {
+                NSEvent.removeMonitor(m)
+                clickMonitor = nil
+            }
+        }
+    }
 
     static let cardSeconds = 6.0
     static let maxCardRows = 3
+    static let hoverDelay = 0.12  // passing over the dot on the way elsewhere shouldn't flash the panel
 
     init(store: Store) {
         self.store = store
@@ -1075,28 +1268,33 @@ final class Controller: NSObject {
         // not hover. Watch mouse movement instead; it's delivered only while the
         // mouse moves, and each event is one rectangle check.
         mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: .mouseMoved) { [weak self] _ in
-            guard let self, let frame = self.item.button?.window?.frame else { return }
-            self.setOverDot(frame.contains(NSEvent.mouseLocation))
+            guard let self else { return }
+            self.setOverDot(self.mouseOnDot)
         }
         panel.card.onHover = { [weak self] inside in
             guard let self else { return }
             self.overPanel = inside
-            if !inside { self.scheduleHide(after: self.mode == .card ? 1.5 : 0.3) }
+            if !inside { self.scheduleHide(after: self.mode == .summary ? 0.3 : 1.5) }
         }
         store.onChange = { [weak self] fresh in self?.storeChanged(fresh) }
         updateDot()
     }
 
+    private var mouseOnDot: Bool { item.button?.window?.frame.contains(NSEvent.mouseLocation) ?? false }
+    private var mouseOnPanel: Bool { panel.isVisible && panel.frame.contains(NSEvent.mouseLocation) }
+
     // MARK: Dot
 
     private func updateDot() {
         guard let b = item.button else { return }
-        switch dot(for: Array(store.sessions.values)) {
+        let all = Array(store.sessions.values)
+        switch dot(for: all) {
         case .empty: b.image = DotImage.empty; b.title = ""
         case .needs: b.image = DotImage.needs; b.title = ""
         case .done(let n): b.image = DotImage.done; b.title = " \(n)"
         }
-        b.setAccessibilityLabel("blink: " + summaryLine(Array(store.sessions.values)))
+        b.appearsDisabled = Prefs.paused  // a dimmed dot says "popups paused"
+        b.setAccessibilityLabel("blink: " + summaryLine(all) + (Prefs.paused ? ", popups paused" : ""))
     }
 
     @objc func mouseEntered(with event: NSEvent) { setOverDot(true) }
@@ -1105,8 +1303,15 @@ final class Controller: NSObject {
     private func setOverDot(_ inside: Bool) {
         guard inside != overDot else { return }
         overDot = inside
+        hoverWork?.cancel()
         if inside {
-            if !pinned { show(.summary) }
+            guard !pinned else { return }
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, self.overDot, !self.pinned else { return }
+                self.show(.summary)
+            }
+            hoverWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + (mode == .hidden ? Self.hoverDelay : 0), execute: work)
         } else {
             scheduleHide(after: 0.3)
         }
@@ -1114,6 +1319,7 @@ final class Controller: NSObject {
 
     @objc private func dotClicked() {
         let e = NSApp.currentEvent
+        hoverWork?.cancel()
         if e?.type == .rightMouseUp || e?.modifierFlags.contains(.control) == true {
             showMenu()
         } else if pinned {
@@ -1132,7 +1338,7 @@ final class Controller: NSObject {
         switch mode {
         case .summary:
             render()
-        case .card, .hidden:
+        case .card, .hint, .hidden:
             // Cards only show sessions that still need attention.
             cardIds = cardIds.filter { id in
                 guard let s = store.sessions[id] else { return false }
@@ -1152,21 +1358,26 @@ final class Controller: NSObject {
 
     // MARK: Panel
 
+    /// First launch only: point at the dot once, so it isn't a mystery.
+    func showHint() {
+        guard mode == .hidden else { return }
+        show(.hint)
+        scheduleHide(after: 8)
+    }
+
     private func show(_ m: Mode) {
         hideWork?.cancel()
         let wasHidden = mode == .hidden
         mode = m
-        render()
-        guard let b = item.button else { return }
-        panel.place(under: b)
+        render(animate: !wasHidden)
         if wasHidden {
             let target = panel.frame
             panel.alphaValue = 0
-            panel.setFrameOrigin(NSPoint(x: target.minX, y: target.minY + 6))
+            if !Motion.reduced { panel.setFrameOrigin(NSPoint(x: target.minX, y: target.minY + 6)) }
             panel.orderFrontRegardless()
             NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.16
-                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                ctx.duration = Motion.reduced ? 0.12 : 0.22
+                ctx.timingFunction = Motion.easeOut
                 panel.animator().alphaValue = 1
                 panel.animator().setFrame(target, display: true)
             }
@@ -1174,14 +1385,18 @@ final class Controller: NSObject {
         ticker?.invalidate()
         ticker = nil
         if m == .summary {  // keep "running · 12m" honest while the panel is open
-            ticker = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in self?.render() }
+            ticker = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+                self?.panel.refreshTimes(Date())
+            }
         }
     }
 
     private func scheduleHide(after delay: TimeInterval) {
         hideWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            guard let self, !self.pinned, !self.overDot, !self.overPanel else { return }
+            // Trust where the pointer is, not enter/exit bookkeeping: a fast
+            // move can skip an exit event.
+            guard let self, !self.pinned, !self.mouseOnDot, !self.mouseOnPanel else { return }
             self.hide()
         }
         hideWork = work
@@ -1196,24 +1411,33 @@ final class Controller: NSObject {
         mode = .hidden
         cardIds = []
         overPanel = false
+        overDot = mouseOnDot
         let start = panel.frame
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.14
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
             panel.animator().alphaValue = 0
-            panel.animator().setFrame(start.offsetBy(dx: 0, dy: 6), display: true)
+            if !Motion.reduced { panel.animator().setFrame(start.offsetBy(dx: 0, dy: 4), display: true) }
         }, completionHandler: { [weak self] in
             guard let self, self.mode == .hidden else { return }
             self.panel.orderOut(nil)
-            self.panel.setRows([])  // drop views (and pulse animations) while hidden
+            self.panel.update([], under: nil, animate: false)  // drop views (and pulse animations) while hidden
         })
     }
 
-    private func render() {
+    private func render(animate: Bool = true) {
         guard mode != .hidden else { return }
-        panel.setRows(panelRows(store.sessions, card: mode == .card ? cardIds : nil, now: Date(),
-                                onOpen: { [weak self] s in self?.open(s) },
-                                onDismiss: { [weak self] s in self?.store.dismiss(s.id) }))
-        if let b = item.button { panel.place(under: b) }
+        let rows: [NSView]
+        if mode == .hint {
+            rows = [messageRow(firstRunHint.0, firstRunHint.1)]
+        } else {
+            rows = panelRows(store.sessions, card: mode == .card ? cardIds : nil, now: Date(),
+                             onOpen: { [weak self] s in self?.open(s) },
+                             onDismiss: { [weak self] s in self?.store.dismiss(s.id) },
+                             onClearDone: { [weak self] in self?.clearDone() },
+                             paused: Prefs.paused)
+        }
+        panel.update(rows, under: item.button?.window, animate: animate)
     }
 
     private func open(_ s: Session) {
@@ -1249,7 +1473,10 @@ final class Controller: NSObject {
     @objc private func clearDone() {
         for s in store.sessions.values where s.state == .done { store.dismiss(s.id) }
     }
-    @objc private func togglePause() { Prefs.paused.toggle() }
+    @objc private func togglePause() {
+        Prefs.paused.toggle()
+        updateDot()
+    }
     @objc private func toggleLogin() { Prefs.setLaunchAtLogin(!Prefs.launchAtLogin) }
 }
 
@@ -1264,22 +1491,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.terminate(nil)  // already running
             return
         }
-        firstRun()
+        let first = firstRun()
         let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/blink/sessions")
         let store = Store(dir: dir)
         controller = Controller(store: store)
         store.start()
         self.store = store
+        if first {  // let the status item settle into the menu bar first
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.controller?.showHint() }
+        }
     }
 
     /// Defaults from the spec: launch at login on, and ask once for
     /// Accessibility (used only to read VS Code's front window title).
-    private func firstRun() {
+    private func firstRun() -> Bool {
         let d = UserDefaults.standard
-        guard !d.bool(forKey: "setupDone") else { return }
+        guard !d.bool(forKey: "setupDone") else { return false }
         d.set(true, forKey: "setupDone")
         Prefs.setLaunchAtLogin(true)
         _ = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
+        return true
     }
 }
 

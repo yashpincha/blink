@@ -10,11 +10,13 @@ done, and takes you to them.
 - Hover the dot to see every session: `2 done · 3 running · 1 needs you`.
 - Click a session to jump to it: the exact VS Code terminal tab or Claude
   panel tab, or the exact Terminal.app tab. Done sessions then leave the list.
-  `✕` clears one without jumping.
-- Left-click pins the list open. Right-click: Clear done · Pause popups ·
-  Launch at login · Quit.
+  `✕` clears one without jumping; **Clear done** clears them all.
+- Left-click pins the list open (click anywhere else to close it).
+  Right-click: Clear done · Pause popups · Launch at login · Quit. While
+  popups are paused, the dot is dimmed.
+- Respects Reduce Motion, and follows light and dark mode.
 
-It's a ~360 KB native app (one Swift file, AppKit). It uses no CPU while idle:
+It's a ~440 KB native app (one Swift file, AppKit). It uses no CPU while idle:
 nothing polls. Claude Code hooks write a small file per session, and the app
 wakes only when a file changes or a session's process exits.
 

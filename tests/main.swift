@@ -21,7 +21,7 @@ check(done?.pid == 4242, "pid")
 check(done?.host == .vscodeTerminal, "vscode terminal host")
 check(done?.ssePort == "29005", "sse port")
 check(done?.folder == "proj", "folder name")
-check(done?.message == "Summary", "first line of message: \(done?.message ?? "nil")")
+check(done?.message == "Fixed the flaky test. More text", "skips heading, joins short opener: \(done?.message ?? "nil")")
 check(done?.since == t0, "since = mtime")
 
 let needs = parseSession(
@@ -52,6 +52,13 @@ check(parseLabel(file("running\t1", #"{"prompt":"Fix the login redirect bug that
 // MARK: snippet
 
 check(snippet("\n\n  - **Done**: all `tests` pass\nsecond") == "Done: all tests pass", "snippet strips markdown")
+check(snippet("## Plan\n```swift\nlet x = 1\n```\n| a | b |\n---\nAll good, shipping it now.") == "All good, shipping it now.",
+      "skips headings, code, tables, rules")
+check(snippet("# Only a heading") == "Only a heading", "heading as a last resort")
+check(snippet("Here's what changed:\n- Added retries to the uploader\n- Fixed the timeout") ==
+      "Here's what changed: Added retries to the uploader", "opener borrows the next line")
+check(snippet("This first line is long enough to stand on its own.\nSecond line") ==
+      "This first line is long enough to stand on its own.", "long first line stands alone")
 check(snippet("") == "", "empty snippet")
 check(snippet(String(repeating: "a", count: 300), max: 10) == "aaaaaaaaa…", "snippet max")
 
@@ -60,10 +67,10 @@ check(snippet(String(repeating: "a", count: 300), max: 10) == "aaaaaaaaa…", "s
 func s(_ id: String, _ st: SessionState, _ dir: String = "/p/a", _ t: Date = t0) -> Session {
     Session(id: id, state: st, projectDir: dir, since: t)
 }
-check(summaryLine([]) == "No sessions", "empty summary")
+check(summaryLine([]) == "No active sessions", "empty summary")
 check(summaryLine([s("1", .done), s("2", .done), s("3", .running), s("4", .needs), s("5", .idle)])
       == "2 done · 1 running · 1 needs you", "summary line")
-check(summaryLine([s("1", .idle)]) == "No sessions", "idle not counted")
+check(summaryLine([s("1", .idle)]) == "No active sessions", "idle not counted")
 
 check(dot(for: []) == .empty, "empty dot")
 check(dot(for: [s("1", .running)]) == .empty, "running only → hollow")

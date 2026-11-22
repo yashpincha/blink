@@ -43,10 +43,10 @@ case "${1:-app}" in
     cp Resources/Info.plist "$APP/Contents/Info.plist"
     swiftc $FLAGS -O -wmo -parse-as-library Sources/blink.swift -o "$APP/Contents/MacOS/blink"
     if security find-identity -p codesigning 2>/dev/null | grep -q '"blink"'; then
-      codesign --force --sign blink --identifier com.yashpincha.blink "$APP"
+      out=$(codesign --force --sign blink --identifier com.yashpincha.blink "$APP" 2>&1) || { echo "$out" >&2; exit 1; }
     else
       echo "note: no local 'blink' signing identity; signing ad-hoc (permissions reset on rebuild)"
-      codesign --force --sign - --identifier com.yashpincha.blink "$APP"
+      out=$(codesign --force --sign - --identifier com.yashpincha.blink "$APP" 2>&1) || { echo "$out" >&2; exit 1; }
     fi
     echo "$APP"
     ;;

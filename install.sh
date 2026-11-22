@@ -62,7 +62,8 @@ echo "    $SETTINGS (backup: settings.json.bak-blink)"
 if command -v code >/dev/null; then
   say "Installing the VS Code helper extension"
   ./build.sh vsix >/dev/null
-  code --install-extension build/blink.vsix --force >/dev/null
+  code --install-extension build/blink.vsix --force >/dev/null 2>&1 \
+    || echo "    (couldn't install it; clicks on VS Code terminal sessions will raise the window only)"
 fi
 
 # 5. Start it.

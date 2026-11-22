@@ -100,9 +100,9 @@ check(order == ["n", "d-new", "d-old", "r-old", "r-new"], "panel order: \(order)
 
 var a1 = s("1", .done, "/p/repo"); a1.label = "Fix tests"
 var a2 = s("2", .running, "/p/repo"); a2.label = "Write docs"
-let titles = rowTitles([a1, a2, s("3", .done, "/p/other")])
-check(titles["1"] == "repo · Fix tests" && titles["2"] == "repo · Write docs", "shared folder gets labels")
-check(titles["3"] == "other", "unique folder: name only")
+let labels = rowLabels([a1, a2, s("3", .done, "/p/other")])
+check(labels["1"] == "Fix tests" && labels["2"] == "Write docs", "shared folder gets labels")
+check(labels["3"] == "", "unique folder: no label")
 
 check(titleShowsFolder("main.py — proj", "proj"), "title match")
 check(titleShowsFolder("proj", "proj"), "title is folder")

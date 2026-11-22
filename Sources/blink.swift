@@ -157,15 +157,14 @@ func panelOrder(_ sessions: [Session]) -> [Session] {
     }
 }
 
-/// Row titles: the folder name, plus the first prompt when two sessions share a folder.
-func rowTitles(_ sessions: [Session]) -> [String: String] {
+/// Sessions that share a folder are told apart by their first prompt. Returns
+/// the label to show next to the folder name ("" when the folder is unique).
+func rowLabels(_ sessions: [Session]) -> [String: String] {
     var count: [String: Int] = [:]
     for s in sessions { count[s.folder, default: 0] += 1 }
-    var titles: [String: String] = [:]
-    for s in sessions {
-        titles[s.id] = (count[s.folder] ?? 0) > 1 && !s.label.isEmpty ? "\(s.folder) · \(s.label)" : s.folder
-    }
-    return titles
+    var labels: [String: String] = [:]
+    for s in sessions { labels[s.id] = (count[s.folder] ?? 0) > 1 ? s.label : "" }
+    return labels
 }
 
 /// VS Code window titles look like "file.py — project". Does this one show `folder`?
@@ -647,7 +646,7 @@ final class RowView: NSView {
         }
     }
 
-    init(_ s: Session, title: String, now: Date, pulse: Bool) {
+    init(_ s: Session, label: String, now: Date, pulse: Bool) {
         time = makeLabel("\(stateWord(s.state)) · \(ago(s.since, now: now))", size: 11.5,
                          color: Palette.secondary, digits: true)
         super.init(frame: .zero)
@@ -657,7 +656,17 @@ final class RowView: NSView {
         layer?.cornerCurve = .continuous
 
         let glyph = GlyphView(s.state, pulse: pulse)
-        let name = makeLabel(title, size: 13, weight: .medium, color: Palette.text)
+        let name = makeLabel(s.folder, size: 13, weight: .medium, color: Palette.text)
+        if !label.isEmpty {  // folder in bold, then the first prompt in gray
+            let t = NSMutableAttributedString(string: s.folder, attributes: [
+                .font: NSFont.systemFont(ofSize: 13, weight: .medium), .foregroundColor: Palette.text])
+            t.append(NSAttributedString(string: "  " + label, attributes: [
+                .font: NSFont.systemFont(ofSize: 13), .foregroundColor: Palette.secondary]))
+            let para = NSMutableParagraphStyle()
+            para.lineBreakMode = .byTruncatingTail
+            t.addAttribute(.paragraphStyle, value: para, range: NSRange(location: 0, length: t.length))
+            name.attributedStringValue = t
+        }
         name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         time.setContentCompressionResistancePriority(.required, for: .horizontal)
         for v in [glyph, name, time] as [NSView] { addSubview(v) }
@@ -841,6 +850,77 @@ private func textRow(_ text: String, top: CGFloat, bottom: CGFloat) -> NSView {
     return v
 }
 
+/// Rows for the card (`card` = the session ids to show) or, with `card: nil`,
+/// the full summary panel.
+func panelRows(_ sessions: [String: Session], card: [String]?, now: Date,
+               onOpen: @escaping (Session) -> Void, onDismiss: @escaping (Session) -> Void) -> [NSView] {
+    let all = Array(sessions.values)
+    let ordered = panelOrder(all)
+    let labels = rowLabels(ordered)
+    func row(_ s: Session, pulse: Bool) -> RowView {
+        let r = RowView(s, label: labels[s.id] ?? "", now: now, pulse: pulse)
+        r.onClick = { onOpen(s) }
+        r.onDismiss = { onDismiss(s) }
+        return r
+    }
+    if let card {
+        return card.compactMap { sessions[$0] }.map { row($0, pulse: false) }
+    }
+    let maxRows = 10
+    var rows: [NSView] = [textRow(summaryLine(all), top: 7, bottom: ordered.isEmpty ? 7 : 3)]
+    rows += ordered.prefix(maxRows).map { row($0, pulse: true) }
+    if ordered.count > maxRows {
+        rows.append(textRow("+\(ordered.count - maxRows) more", top: 3, bottom: 6))
+    }
+    return rows
+}
+
+/// Developer aid: `blink --preview <dir>` renders the card and the panel,
+/// light and dark, to PNGs (no screen-recording permission needed).
+func renderPreviews(to dir: String) {
+    let now = Date()
+    let sample = [
+        Session(id: "1", state: .done, projectDir: "/x/proj",
+                message: "Done. The cosine schedule with warmup beats step decay by 1.8% on val loss.",
+                since: now.addingTimeInterval(-240)),
+        Session(id: "2", state: .needs, projectDir: "/x/repo",
+                message: "Claude needs your permission to use Bash", since: now.addingTimeInterval(-30)),
+        Session(id: "3", state: .running, projectDir: "/x/sim", label: "Run the parameter sweep",
+                since: now.addingTimeInterval(-720)),
+        Session(id: "4", state: .running, projectDir: "/x/sim", label: "Plot the phase diagram",
+                since: now.addingTimeInterval(-95)),
+        Session(id: "5", state: .done, projectDir: "/x/website", message: "Shipped the new landing page copy.",
+                since: now.addingTimeInterval(-3 * 3600)),
+    ]
+    let sessions = Dictionary(uniqueKeysWithValues: sample.map { ($0.id, $0) })
+    for (look, name) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+        for (kind, card) in [("card", ["1", "2"] as [String]?), ("panel", nil)] {
+            let panel = DropPanel()
+            panel.appearance = NSAppearance(named: name)
+            panel.setRows(panelRows(sessions, card: card, now: now, onOpen: { _ in }, onDismiss: { _ in }))
+            panel.setFrameOrigin(NSPoint(x: -10000, y: -10000))
+            panel.orderFrontRegardless()
+            panel.displayIfNeeded()
+            guard let layer = panel.contentView?.layer else { continue }
+            let pad: CGFloat = 24, scale: CGFloat = 2
+            let size = CGSize(width: panel.frame.width + pad * 2, height: panel.frame.height + pad * 2)
+            guard let ctx = CGContext(data: nil, width: Int(size.width * scale), height: Int(size.height * scale),
+                                      bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { continue }
+            ctx.scaleBy(x: scale, y: scale)
+            ctx.setFillColor(look == "dark" ? NSColor(hex: 0x3A3A3C).cgColor : NSColor(hex: 0xD9D9DE).cgColor)
+            ctx.fill(CGRect(origin: .zero, size: size))
+            ctx.translateBy(x: pad, y: pad)
+            NSAppearance(named: name)?.performAsCurrentDrawingAppearance { layer.render(in: ctx) }
+            if let img = ctx.makeImage(),
+               let png = NSBitmapImageRep(cgImage: img).representation(using: .png, properties: [:]) {
+                try? png.write(to: URL(fileURLWithPath: dir).appendingPathComponent("\(kind)-\(look).png"))
+            }
+            panel.orderOut(nil)
+        }
+    }
+}
+
 // MARK: - Settings
 
 enum Prefs {
@@ -878,7 +958,6 @@ final class Controller: NSObject {
 
     static let cardSeconds = 6.0
     static let maxCardRows = 3
-    static let maxPanelRows = 10
 
     init(store: Store) {
         self.store = store
@@ -1022,37 +1101,11 @@ final class Controller: NSObject {
     }
 
     private func render() {
-        let all = Array(store.sessions.values)
-        let titles = rowTitles(panelOrder(all))
-        let now = Date()
-        var rows: [NSView] = []
-        switch mode {
-        case .hidden:
-            return
-        case .card:
-            for id in cardIds {
-                guard let s = store.sessions[id] else { continue }
-                rows.append(row(s, title: titles[id] ?? s.folder, now: now, pulse: false))
-            }
-        case .summary:
-            let ordered = panelOrder(all)
-            rows.append(textRow(summaryLine(all), top: 7, bottom: ordered.isEmpty ? 7 : 3))
-            for s in ordered.prefix(Self.maxPanelRows) {
-                rows.append(row(s, title: titles[s.id] ?? s.folder, now: now, pulse: true))
-            }
-            if ordered.count > Self.maxPanelRows {
-                rows.append(textRow("+\(ordered.count - Self.maxPanelRows) more", top: 3, bottom: 6))
-            }
-        }
-        panel.setRows(rows)
+        guard mode != .hidden else { return }
+        panel.setRows(panelRows(store.sessions, card: mode == .card ? cardIds : nil, now: Date(),
+                                onOpen: { [weak self] s in self?.open(s) },
+                                onDismiss: { [weak self] s in self?.store.dismiss(s.id) }))
         if let b = item.button { panel.place(under: b) }
-    }
-
-    private func row(_ s: Session, title: String, now: Date, pulse: Bool) -> RowView {
-        let r = RowView(s, title: title, now: now, pulse: pulse)
-        r.onClick = { [weak self] in self?.open(s) }
-        r.onDismiss = { [weak self] in self?.store.dismiss(s.id) }
-        return r
     }
 
     private func open(_ s: Session) {
@@ -1129,6 +1182,11 @@ enum Main {
         let args = CommandLine.arguments
         if args.contains("--version") { print("blink 0.1.0"); return }
         if args.contains("--unregister-login") { try? SMAppService.mainApp.unregister(); return }
+        if let i = args.firstIndex(of: "--preview"), i + 1 < args.count {
+            _ = NSApplication.shared
+            renderPreviews(to: args[i + 1])
+            return
+        }
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
         let delegate = AppDelegate()

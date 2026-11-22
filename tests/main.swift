@@ -137,5 +137,51 @@ check(parentPid(getpid()) == getppid(), "parentPid")
 check(isAlive(getpid()), "self alive")
 check(startTime(getpid()) != nil, "start time")
 
+// MARK: Store: opening one done session leaves the others alone
+
+do {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("blink-store-\(getpid())")
+    try? fm.removeItem(at: dir)
+    try! fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    func write(_ id: String, _ head: String, _ payload: String = "{}") {
+        try! Data((head + "\n" + payload).utf8).write(to: dir.appendingPathComponent("\(id).state"))
+    }
+    func hook(_ event: String, _ id: String) {  // the real hook script, against this folder
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", #"mkdir -p "$HOME/.claude/blink" && ln -sfn "$DIR" "$HOME/.claude/blink/sessions" && echo '{}' | sh "$HOOK" "$EV""#]
+        let home = dir.appendingPathComponent("home").path
+        p.environment = ["HOME": home, "DIR": dir.path, "HOOK": FileManager.default.currentDirectoryPath + "/hooks/hook.sh",
+                         "EV": event, "CLAUDE_CODE_SESSION_ID": id, "CLAUDE_PID": "\(getpid())",
+                         "CLAUDE_CODE_ENTRYPOINT": "cli", "PATH": "/usr/bin:/bin"]
+        try! p.run()
+        p.waitUntilExit()
+    }
+    let me = getpid()
+    write("one", "done\t\(me)\tcli\tvscode\t\t\t/p/one", #"{"last_assistant_message":"first"}"#)
+    write("two", "done\t\(me)\tcli\tvscode\t\t\t/p/two", #"{"last_assistant_message":"second"}"#)
+
+    let store = Store(dir: dir)
+    store.rescan(initial: true)
+    check(store.sessions["one"]?.state == .done && store.sessions["two"]?.state == .done, "both done at start")
+
+    store.dismiss("one")  // what clicking session 1 does
+    store.rescan()
+    check(store.sessions["one"]?.state == .idle, "clicked session leaves the list")
+    check(store.sessions["two"]?.state == .done, "the other done session stays")
+
+    hook("idle", "two")  // Claude Code's ~60 s "waiting for your input" reminder
+    hook("tool", "two")
+    store.rescan()
+    check(store.sessions["two"]?.state == .done, "still done after idle reminders")
+
+    hook("running", "one")  // you send session 1 a new prompt
+    store.rescan()
+    check(store.sessions["one"]?.state == .running && store.sessions["two"]?.state == .done,
+          "new prompt in session 1 doesn't touch session 2")
+    check(dot(for: Array(store.sessions.values)) == .done(1), "dot still shows 1 done")
+    try? fm.removeItem(at: dir)
+}
+
 print(failures == 0 ? "All tests passed." : "\(failures) test(s) failed.")
 exit(failures == 0 ? 0 : 1)

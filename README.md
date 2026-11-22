@@ -88,7 +88,8 @@ Jumping to a session:
 - **VS Code Claude panel:** the same lookup, using Claude's parent process.
   It opens `vscode://anthropic.claude-code/open?session=…&windowId=…`.
 - **Terminal.app:** AppleScript selects the tab whose tty matches the
-  session's.
+  session's. The script is compiled once and warmed up in the background when
+  a Terminal session appears, so a click takes ~5–15 ms instead of ~0.75 s.
 
 ## Privacy
 

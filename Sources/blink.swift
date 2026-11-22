@@ -394,8 +394,11 @@ enum Focus {
     static func open(_ s: Session) {
         switch s.host {
         case .terminal:
-            if let tty = ttyPath(s.pid), terminalSelect(tty: tty) { return }
-            activate(bundleId: "com.apple.Terminal")
+            let tty = ttyPath(s.pid)
+            terminal.async {  // off the main thread, so the panel never freezes
+                if let tty, terminalCall("reveal", tty)?.booleanValue == true { return }
+                DispatchQueue.main.async { activate(bundleId: "com.apple.Terminal") }
+            }
         case .vscodeTerminal:
             vscodeTerminal(s)
         case .vscodePanel:
@@ -479,26 +482,88 @@ enum Focus {
         NSRunningApplication.runningApplications(withBundleIdentifier: bundleId).first?.activate()
     }
 
-    // Terminal.app: select the tab whose tty is the session's.
-    private static func terminalSelect(tty: String) -> Bool {
-        let src = """
-        tell application "Terminal"
-          repeat with w in windows
-            repeat with t in tabs of w
-              if tty of t is "\(tty)" then
-                set miniaturized of w to false
-                set selected tab of w to t
-                set index of w to 1
-                activate
-                return true
-              end if
-            end repeat
+    // MARK: Terminal.app
+
+    /// AppleScript for Terminal, compiled once. `locate` asks Terminal for
+    /// every tab's tty in one Apple Event, rather than one event per tab.
+    private static let terminalSource = """
+    on locate(t)
+      tell application "Terminal"
+        set ttys to tty of every tab of every window
+        repeat with i from 1 to count of ttys
+          set j to 0
+          repeat with x in item i of ttys
+            set j to j + 1
+            if contents of x is t then return {i, j}
           end repeat
-        end tell
-        return false
-        """
+        end repeat
+      end tell
+      return {}
+    end locate
+
+    on reveal(t)
+      set p to locate(t)
+      if p is {} then return false
+      tell application "Terminal"
+        set w to window (item 1 of p)
+        set miniaturized of w to false
+        set selected tab of w to tab (item 2 of p) of w
+        set index of w to 1
+        activate
+      end tell
+      return true
+    end reveal
+
+    on selectedtty()
+      tell application "Terminal" to return tty of selected tab of front window
+    end selectedtty
+
+    on ping()
+      tell application "Terminal" to return count of windows
+    end ping
+    """
+
+    /// All AppleScript runs here, one call at a time.
+    static let terminal = DispatchQueue(label: "blink.terminal", qos: .userInitiated)
+    private static var terminalScript: NSAppleScript?  // only touched on `terminal`
+    private static var warmedTerminal: pid_t = 0       // main thread
+
+    /// Calls a handler in the Terminal script. Run on `terminal`.
+    static func terminalCall(_ handler: String, _ args: String...) -> NSAppleEventDescriptor? {
+        dispatchPrecondition(condition: .onQueue(terminal))
+        if terminalScript == nil {
+            let script = NSAppleScript(source: terminalSource)
+            guard script?.compileAndReturnError(nil) == true else { return nil }
+            terminalScript = script
+        }
+        // 'ascr'/'psbr': "call a handler"; 'snam': its name (OpenScripting's ASRegistry.h).
+        let event = NSAppleEventDescriptor(eventClass: 0x6173_6372, eventID: 0x7073_6272, targetDescriptor: nil,
+                                           returnID: AEReturnID(kAutoGenerateReturnID),
+                                           transactionID: AETransactionID(kAnyTransactionID))
+        event.setDescriptor(NSAppleEventDescriptor(string: handler), forKeyword: 0x736E_616D)
+        let params = NSAppleEventDescriptor.list()
+        for (i, a) in args.enumerated() { params.insert(NSAppleEventDescriptor(string: a), at: i + 1) }
+        event.setParam(params, forKeyword: keyDirectObject)
         var err: NSDictionary?
-        return NSAppleScript(source: src)?.executeAndReturnError(&err).booleanValue ?? false
+        let result = terminalScript?.executeAppleEvent(event, error: &err)
+        return err == nil ? result : nil
+    }
+
+    /// The first jump to Terminal costs ~0.75 s: loading AppleScript, then
+    /// opening a line to Terminal. Pay that in the background as soon as a
+    /// Terminal session appears, so the click is instant. It never prompts:
+    /// without permission yet, it only loads AppleScript.
+    static func warmTerminal() {
+        guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Terminal").first,
+              app.processIdentifier != warmedTerminal else { return }
+        warmedTerminal = app.processIdentifier
+        terminal.async {
+            let target = NSAppleEventDescriptor(processIdentifier: app.processIdentifier)
+            let allowed = target.aeDesc.map {
+                AEDeterminePermissionToAutomateTarget($0, typeWildCard, typeWildCard, false) == noErr
+            } ?? false
+            _ = allowed ? terminalCall("ping") : terminalCall("locate", "")
+        }
     }
 
     // MARK: Already looking at it?
@@ -508,9 +573,7 @@ enum Focus {
         switch s.host {
         case .terminal:
             guard front.bundleIdentifier == "com.apple.Terminal", let tty = ttyPath(s.pid) else { return false }
-            var err: NSDictionary?
-            let src = #"tell application "Terminal" to return tty of selected tab of front window"#
-            return NSAppleScript(source: src)?.executeAndReturnError(&err).stringValue == tty
+            return terminal.sync { terminalCall("selectedtty")?.stringValue } == tty
         case .vscodeTerminal, .vscodePanel:
             guard front.bundleIdentifier == s.bundleId,
                   let title = focusedWindowTitle(front.processIdentifier) else { return false }
@@ -1335,6 +1398,7 @@ final class Controller: NSObject {
 
     private func storeChanged(_ fresh: [Session]) {
         updateDot()
+        if store.sessions.values.contains(where: { $0.host == .terminal }) { Focus.warmTerminal() }
         switch mode {
         case .summary:
             render()
@@ -1441,9 +1505,9 @@ final class Controller: NSObject {
     }
 
     private func open(_ s: Session) {
+        if !pinned { hide() }  // the panel goes first, so the click feels instant
         Focus.open(s)
         if s.state == .done { store.dismiss(s.id) }
-        if !pinned { hide() }
     }
 
     // MARK: Menu

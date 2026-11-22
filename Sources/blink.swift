@@ -394,10 +394,11 @@ enum Focus {
     static func open(_ s: Session) {
         switch s.host {
         case .terminal:
-            let tty = ttyPath(s.pid)
+            guard let tty = ttyPath(s.pid) else { return activate(bundleId: "com.apple.Terminal") }
             terminal.async {  // off the main thread, so the panel never freezes
-                if let tty, terminalCall("reveal", tty)?.booleanValue == true { return }
-                DispatchQueue.main.async { activate(bundleId: "com.apple.Terminal") }
+                if terminalCall("jump", tty) == nil {
+                    DispatchQueue.main.async { activate(bundleId: "com.apple.Terminal") }
+                }
             }
         case .vscodeTerminal:
             vscodeTerminal(s)
@@ -478,64 +479,65 @@ enum Focus {
         return String(data: data, encoding: .utf8)?.split(separator: "\n").first.flatMap { pid_t($0) }
     }
 
+    /// Brings an app forward the way the Dock does (Launch Services), which
+    /// works from a background app on macOS 14+, unlike NSRunningApplication.activate.
     static func activate(bundleId: String) {
-        NSRunningApplication.runningApplications(withBundleIdentifier: bundleId).first?.activate()
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) else { return }
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = true
+        NSWorkspace.shared.openApplication(at: url, configuration: config, completionHandler: nil)
     }
 
     // MARK: Terminal.app
 
-    /// AppleScript for Terminal, compiled once. `locate` asks Terminal for
-    /// every tab's tty in one Apple Event, rather than one event per tab.
+    /// AppleScript for Terminal, compiled once. `jump` sends one-way messages
+    /// (no waiting for Terminal to answer each step) and finds the tab and
+    /// window with `whose` filters that Terminal evaluates itself. Measured:
+    /// Terminal is in front ~50 ms after the click, versus ~150 ms when the
+    /// script waited for a reply to every step.
     private static let terminalSource = """
-    on locate(t)
-      tell application "Terminal"
-        set ttys to tty of every tab of every window
-        repeat with i from 1 to count of ttys
-          set j to 0
-          repeat with x in item i of ttys
-            set j to j + 1
-            if contents of x is t then return {i, j}
-          end repeat
-        end repeat
-      end tell
-      return {}
-    end locate
-
-    on reveal(t)
-      set p to locate(t)
-      if p is {} then return false
-      tell application "Terminal"
-        set w to window (item 1 of p)
-        set miniaturized of w to false
-        set selected tab of w to tab (item 2 of p) of w
-        set index of w to 1
-        activate
-      end tell
+    on jump(t)
+      ignoring application responses
+        tell application "Terminal"
+          set selected of (every tab of every window whose tty is t) to true
+          set miniaturized of (every window whose tty of selected tab is t) to false
+          set index of (every window whose tty of selected tab is t) to 1
+          activate
+        end tell
+      end ignoring
       return true
-    end reveal
+    end jump
 
     on selectedtty()
       tell application "Terminal" to return tty of selected tab of front window
     end selectedtty
 
     on ping()
-      tell application "Terminal" to return count of windows
+      ignoring application responses
+        tell application "Terminal" to count windows
+      end ignoring
+      return true
     end ping
     """
 
     /// All AppleScript runs here, one call at a time.
     static let terminal = DispatchQueue(label: "blink.terminal", qos: .userInitiated)
-    private static var terminalScript: NSAppleScript?  // only touched on `terminal`
-    private static var warmedTerminal: pid_t = 0       // main thread
+    private static var terminalScript: NSAppleScript?  // these two: only on `terminal`
+    private static var terminalAllowed: pid_t = 0
+    private static var lastWarm = Date.distantPast     // main thread
 
-    /// Calls a handler in the Terminal script. Run on `terminal`.
-    static func terminalCall(_ handler: String, _ args: String...) -> NSAppleEventDescriptor? {
+    private static func compiledTerminalScript() -> NSAppleScript? {
         dispatchPrecondition(condition: .onQueue(terminal))
         if terminalScript == nil {
             let script = NSAppleScript(source: terminalSource)
-            guard script?.compileAndReturnError(nil) == true else { return nil }
-            terminalScript = script
+            if script?.compileAndReturnError(nil) == true { terminalScript = script }
         }
+        return terminalScript
+    }
+
+    /// Calls a handler in the Terminal script. Run on `terminal`.
+    static func terminalCall(_ handler: String, _ args: String...) -> NSAppleEventDescriptor? {
+        guard let script = compiledTerminalScript() else { return nil }
         // 'ascr'/'psbr': "call a handler"; 'snam': its name (OpenScripting's ASRegistry.h).
         let event = NSAppleEventDescriptor(eventClass: 0x6173_6372, eventID: 0x7073_6272, targetDescriptor: nil,
                                            returnID: AEReturnID(kAutoGenerateReturnID),
@@ -545,24 +547,32 @@ enum Focus {
         for (i, a) in args.enumerated() { params.insert(NSAppleEventDescriptor(string: a), at: i + 1) }
         event.setParam(params, forKeyword: keyDirectObject)
         var err: NSDictionary?
-        let result = terminalScript?.executeAppleEvent(event, error: &err)
+        let result = script.executeAppleEvent(event, error: &err)
         return err == nil ? result : nil
     }
 
-    /// The first jump to Terminal costs ~0.75 s: loading AppleScript, then
-    /// opening a line to Terminal. Pay that in the background as soon as a
-    /// Terminal session appears, so the click is instant. It never prompts:
-    /// without permission yet, it only loads AppleScript.
+    /// Keeps the Terminal jump fast. The first contact costs ~0.75 s (loading
+    /// AppleScript), and after ~30 s idle Terminal takes ~90 ms to answer
+    /// instead of ~5 ms (App Nap, permission re-checks). So this loads
+    /// AppleScript when a Terminal session appears, and pokes Terminal with a
+    /// no-op whenever the panel opens or you hover it, before you click.
+    /// At most every 2 s, and it never triggers a permission prompt.
     static func warmTerminal() {
-        guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Terminal").first,
-              app.processIdentifier != warmedTerminal else { return }
-        warmedTerminal = app.processIdentifier
+        guard Date().timeIntervalSince(lastWarm) > 2,
+              let app = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Terminal").first
+        else { return }
+        lastWarm = Date()
+        let pid = app.processIdentifier
         terminal.async {
-            let target = NSAppleEventDescriptor(processIdentifier: app.processIdentifier)
-            let allowed = target.aeDesc.map {
-                AEDeterminePermissionToAutomateTarget($0, typeWildCard, typeWildCard, false) == noErr
-            } ?? false
-            _ = allowed ? terminalCall("ping") : terminalCall("locate", "")
+            _ = compiledTerminalScript()
+            if terminalAllowed != pid {
+                let target = NSAppleEventDescriptor(processIdentifier: pid)
+                guard let desc = target.aeDesc,
+                      AEDeterminePermissionToAutomateTarget(desc, typeWildCard, typeWildCard, false) == noErr
+                else { return }
+                terminalAllowed = pid
+            }
+            _ = terminalCall("ping")
         }
     }
 
@@ -1337,10 +1347,15 @@ final class Controller: NSObject {
         panel.card.onHover = { [weak self] inside in
             guard let self else { return }
             self.overPanel = inside
+            if inside { self.warmTerminalIfNeeded() }  // you're about to click
             if !inside { self.scheduleHide(after: self.mode == .summary ? 0.3 : 1.5) }
         }
         store.onChange = { [weak self] fresh in self?.storeChanged(fresh) }
         updateDot()
+    }
+
+    private func warmTerminalIfNeeded() {
+        if store.sessions.values.contains(where: { $0.host == .terminal && $0.state != .idle }) { Focus.warmTerminal() }
     }
 
     private var mouseOnDot: Bool { item.button?.window?.frame.contains(NSEvent.mouseLocation) ?? false }
@@ -1398,7 +1413,7 @@ final class Controller: NSObject {
 
     private func storeChanged(_ fresh: [Session]) {
         updateDot()
-        if store.sessions.values.contains(where: { $0.host == .terminal }) { Focus.warmTerminal() }
+        warmTerminalIfNeeded()
         switch mode {
         case .summary:
             render()
@@ -1431,6 +1446,7 @@ final class Controller: NSObject {
 
     private func show(_ m: Mode) {
         hideWork?.cancel()
+        warmTerminalIfNeeded()
         let wasHidden = mode == .hidden
         mode = m
         render(animate: !wasHidden)

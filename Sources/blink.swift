@@ -811,7 +811,12 @@ final class DropPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 
     func setRows(_ rows: [NSView]) {
+        // Keep the scroll position when the list refreshes under you.
+        let scrolled = stack.arrangedSubviews.compactMap { $0 as? ScrollingList }.first?.contentView.bounds.origin.y
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        defer {
+            if let y = scrolled, let list = rows.compactMap({ $0 as? ScrollingList }).first { list.scroll(toY: y) }
+        }
         for r in rows {
             stack.addArrangedSubview(r)
             r.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -10).isActive = true
@@ -835,7 +840,99 @@ final class DropPanel: NSPanel {
     }
 }
 
-/// Text rows inside the panel: the summary header and "+N more".
+private final class FlippedStack: NSStackView {
+    override var isFlipped: Bool { true }  // content starts at the top
+}
+
+/// Fades the list into the card's background. Click-through.
+private final class FadeView: NSView {
+    private let gradient = CAGradientLayer()
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        recolor()
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override func makeBackingLayer() -> CALayer { gradient }
+    override func viewDidChangeEffectiveAppearance() { recolor() }
+
+    private func recolor() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            let bg = Palette.background.cgColor
+            gradient.colors = [bg.copy(alpha: 0) ?? bg, bg]
+        }
+        gradient.startPoint = CGPoint(x: 0.5, y: 1)  // clear at the top
+        gradient.endPoint = CGPoint(x: 0.5, y: 0)    // card color at the bottom
+    }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+/// Shows the first `visible` rows; the rest scroll (thin overlay scroller).
+final class ScrollingList: NSScrollView {
+    init(_ rows: [NSView], width: CGFloat, visible: Int) {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        drawsBackground = false
+        borderType = .noBorder
+        hasVerticalScroller = true
+        autohidesScrollers = true
+        scrollerStyle = .overlay
+        horizontalScrollElasticity = .none
+
+        let list = FlippedStack()
+        list.orientation = .vertical
+        list.alignment = .leading
+        list.spacing = 0
+        list.translatesAutoresizingMaskIntoConstraints = false
+        for r in rows {
+            list.addArrangedSubview(r)
+            r.widthAnchor.constraint(equalToConstant: width).isActive = true
+        }
+        documentView = list
+        // With more rows than fit, let the next one peek out under a fade.
+        let more = rows.count > visible
+        let height = rows.prefix(visible).reduce(0) { $0 + ceil($1.fittingSize.height) } + (more ? 14 : 0)
+        NSLayoutConstraint.activate([
+            list.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            list.topAnchor.constraint(equalTo: contentView.topAnchor),
+            list.widthAnchor.constraint(equalToConstant: width),
+            widthAnchor.constraint(equalToConstant: width),
+            heightAnchor.constraint(equalToConstant: height),
+        ])
+        if more {
+            addSubview(fade, positioned: .below, relativeTo: verticalScroller)  // framed in layout()
+            contentView.postsBoundsChangedNotifications = true
+            NotificationCenter.default.addObserver(self, selector: #selector(scrolled),
+                                                   name: NSView.boundsDidChangeNotification, object: contentView)
+        }
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    private let fade = FadeView()
+
+    @objc private func scrolled() {
+        guard fade.superview != nil, let doc = documentView, doc.frame.height > 0 else { return }
+        fade.isHidden = contentView.bounds.maxY >= doc.frame.height - 1  // at the bottom: no fade
+    }
+
+    override func layout() {
+        super.layout()
+        if fade.superview != nil {  // NSScrollView tiles its subviews itself; place the fade by hand
+            let h: CGFloat = 26
+            fade.frame = NSRect(x: 0, y: isFlipped ? bounds.height - h : 0, width: bounds.width, height: h)
+        }
+        scrolled()
+    }
+
+    func scroll(toY y: CGFloat) {
+        layoutSubtreeIfNeeded()
+        let maxY = max(0, (documentView?.frame.height ?? 0) - contentView.bounds.height)
+        contentView.scroll(to: NSPoint(x: 0, y: min(y, maxY)))
+        reflectScrolledClipView(contentView)
+    }
+}
+
+/// Text rows inside the panel: the summary header.
 private func textRow(_ text: String, top: CGFloat, bottom: CGFloat) -> NSView {
     let v = NSView()
     v.translatesAutoresizingMaskIntoConstraints = false
@@ -866,11 +963,10 @@ func panelRows(_ sessions: [String: Session], card: [String]?, now: Date,
     if let card {
         return card.compactMap { sessions[$0] }.map { row($0, pulse: false) }
     }
-    let maxRows = 10
     var rows: [NSView] = [textRow(summaryLine(all), top: 7, bottom: ordered.isEmpty ? 7 : 3)]
-    rows += ordered.prefix(maxRows).map { row($0, pulse: true) }
-    if ordered.count > maxRows {
-        rows.append(textRow("+\(ordered.count - maxRows) more", top: 3, bottom: 6))
+    if !ordered.isEmpty {
+        let sessionRows = ordered.prefix(50).map { row($0, pulse: true) }
+        rows.append(ScrollingList(sessionRows, width: DropPanel.width - 10, visible: 3))
     }
     return rows
 }
@@ -955,6 +1051,7 @@ final class Controller: NSObject {
     private var cardIds: [String] = []
     private var hideWork: DispatchWorkItem?
     private var ticker: Timer?
+    private var mouseMonitor: Any?
 
     static let cardSeconds = 6.0
     static let maxCardRows = 3
@@ -970,8 +1067,16 @@ final class Controller: NSObject {
             b.target = self
             b.action = #selector(dotClicked)
             b.sendAction(on: [.leftMouseUp, .rightMouseUp])
+            // macOS 13–15: the dot lives in our own window, so a tracking area works.
             b.addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
                                              owner: self))
+        }
+        // macOS 26: Control Center draws menu bar icons and forwards clicks but
+        // not hover. Watch mouse movement instead; it's delivered only while the
+        // mouse moves, and each event is one rectangle check.
+        mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: .mouseMoved) { [weak self] _ in
+            guard let self, let frame = self.item.button?.window?.frame else { return }
+            self.setOverDot(frame.contains(NSEvent.mouseLocation))
         }
         panel.card.onHover = { [weak self] inside in
             guard let self else { return }
@@ -994,14 +1099,17 @@ final class Controller: NSObject {
         b.setAccessibilityLabel("blink: " + summaryLine(Array(store.sessions.values)))
     }
 
-    @objc func mouseEntered(with event: NSEvent) {
-        overDot = true
-        if !pinned { show(.summary) }
-    }
+    @objc func mouseEntered(with event: NSEvent) { setOverDot(true) }
+    @objc func mouseExited(with event: NSEvent) { setOverDot(false) }
 
-    @objc func mouseExited(with event: NSEvent) {
-        overDot = false
-        scheduleHide(after: 0.3)
+    private func setOverDot(_ inside: Bool) {
+        guard inside != overDot else { return }
+        overDot = inside
+        if inside {
+            if !pinned { show(.summary) }
+        } else {
+            scheduleHide(after: 0.3)
+        }
     }
 
     @objc private func dotClicked() {

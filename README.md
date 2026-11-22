@@ -3,7 +3,9 @@
 A tiny dot in your Mac's menu bar that tells you when Claude Code sessions are
 done, and takes you to them.
 
-- `○` nothing waiting · `● 2` two sessions done · `◐` a session needs you
+- The dot has a face: asleep when nothing's going on, eyes open while Claude
+  works, happy with a count (`2`) when sessions are done, wide-eyed when a
+  session needs you.
 - When a session finishes or needs you (a permission prompt or a question), a
   small card drops down under the dot for a few seconds. It's silent, and it
   doesn't steal focus.

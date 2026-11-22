@@ -4,10 +4,12 @@
 # The blink app watches the folder and does everything else.
 #
 #   hook.sh running   UserPromptSubmit                 you sent a prompt
-#   hook.sh done      Stop, StopFailure                Claude finished its turn
+#   hook.sh done      Stop, StopFailure                Claude finished its turn (or, if
+#                                                      background agents still work, "agents")
 #   hook.sh needs     Notification (permission prompt, question), PreToolUse AskUserQuestion
 #   hook.sh tool      PostToolUse                      only used to leave "needs"
 #   hook.sh idle      Notification idle_prompt         clears a stale state after an interrupt
+#                                                      (never while agents still work)
 #   hook.sh end       SessionEnd                       forget the session
 #
 # File format: one tab-separated metadata line, then the event's JSON payload.
@@ -30,7 +32,15 @@ case $1 in
       idle:running*|idle:needs*) state=idle ;;
       *) exit 0 ;;
     esac ;;
-  running|done|needs) state=$1 ;;
+  done)
+    # Claude Code lists running background tasks in the Stop payload. If any
+    # are agents (not shells or monitors), the session isn't done yet.
+    payload=$(cat)
+    case $payload in
+      *'"type":"subagent"'*|*'"type":"workflow"'*|*'"type":"teammate"'*|*'"type":"cloud session"'*) state=agents ;;
+      *) state=done ;;
+    esac ;;
+  running|needs) state=$1 ;;
   *) exit 0 ;;
 esac
 
@@ -42,7 +52,10 @@ tmp="$dir/.$sid.$$"
 {
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$state" "$CLAUDE_PID" "$CLAUDE_CODE_ENTRYPOINT" \
     "$TERM_PROGRAM" "$CLAUDE_CODE_SSE_PORT" "$__CFBundleIdentifier" "$CLAUDE_PROJECT_DIR"
-  if [ "$1" = "$state" ]; then cat; fi
+  case $1 in
+    done) printf '%s\n' "$payload" ;;
+    running|needs) cat ;;
+  esac
 } > "$tmp" && mv -f "$tmp" "$f"
 
 # Remember the first prompt; it labels sessions that share a folder.

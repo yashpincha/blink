@@ -27,6 +27,7 @@ struct Session: Equatable {
     var message = ""
     var label = ""
     var since = Date()
+    var agents = 0  // Claude stopped, but this many background agents still work
 
     var folder: String {
         let name = (projectDir as NSString).lastPathComponent
@@ -58,8 +59,11 @@ private func splitFile(_ contents: Data) -> (fields: [String], payload: [String:
 }
 
 func parseSession(id: String, contents: Data, mtime: Date) -> Session? {
-    guard let (f, payload) = splitFile(contents),
-          let state = SessionState(rawValue: f.first ?? "") else { return nil }
+    guard let (f, payload) = splitFile(contents) else { return nil }
+    // "agents": Claude finished its turn while background agents still work.
+    // That's still running, not done.
+    let waiting = f.first == "agents"
+    guard let state = waiting ? .running : SessionState(rawValue: f.first ?? "") else { return nil }
     func field(_ i: Int) -> String { i < f.count ? f[i] : "" }
 
     var message = ""
@@ -75,16 +79,25 @@ func parseSession(id: String, contents: Data, mtime: Date) -> Session? {
             message = q
         }
     case .running:
-        message = payload["prompt"] as? String ?? ""
+        message = waiting ? "" : payload["prompt"] as? String ?? ""
     case .idle:
         break
     }
     var dir = field(6)
     if dir.isEmpty { dir = payload["cwd"] as? String ?? "" }
+    var agents = 0
+    if waiting {
+        let tasks = payload["background_tasks"] as? [[String: Any]] ?? []
+        agents = max(1, tasks.filter { agentTaskTypes.contains($0["type"] as? String ?? "") }.count)
+    }
     return Session(id: id, state: state, pid: pid_t(field(1)) ?? 0, entry: field(2), term: field(3),
                    ssePort: field(4), bundleId: field(5), projectDir: dir,
-                   message: snippet(message), since: mtime)
+                   message: snippet(message), since: mtime, agents: agents)
 }
+
+/// Background task types that are agents at work. Shells and monitors aren't:
+/// a dev server left running shouldn't keep a session from being done.
+let agentTaskTypes: Set<String> = ["subagent", "workflow", "teammate", "cloud session"]
 
 /// The first prompt of a session (from its `.first` file), shortened.
 func parseLabel(_ contents: Data) -> String {
@@ -144,12 +157,15 @@ func stateWord(_ s: SessionState) -> String {
     }
 }
 
-enum Dot: Equatable { case empty, done(Int), needs }
+/// The dot's mood: asleep (nothing going on), working (Claude is running),
+/// done (with a count), or needs you. Needs you wins, then done.
+enum Dot: Equatable { case asleep, working, done(Int), needs }
 
 func dot(for sessions: [Session]) -> Dot {
     if sessions.contains(where: { $0.state == .needs }) { return .needs }
     let done = sessions.filter { $0.state == .done }.count
-    return done > 0 ? .done(done) : .empty
+    if done > 0 { return .done(done) }
+    return sessions.contains(where: { $0.state == .running }) ? .working : .asleep
 }
 
 /// Sessions that just became done or need you. Each one gets a card.
@@ -641,33 +657,53 @@ private func makeLabel(_ text: String, size: CGFloat, weight: NSFont.Weight = .r
     return l
 }
 
-/// Menu bar images: ○ nothing waiting, ● done, ◐ needs you. Template images,
-/// so macOS tints them for the menu bar. Drawn once, then cached.
+/// The dot has a face, one per mood. Monochrome template images, so macOS
+/// tints them for the menu bar; drawn once, then cached.
+///   asleep  ring, closed eyes     working  ring, open eyes
+///   done    disc, happy eyes      needs    disc, wide eyes
 enum DotImage {
-    private static func make(_ kind: Int) -> NSImage {
-        let img = NSImage(size: NSSize(width: 14, height: 14), flipped: false) { _ in
-            let c = NSRect(x: 2.5, y: 2.5, width: 9, height: 9)
-            let ring = NSBezierPath(ovalIn: c.insetBy(dx: 0.65, dy: 0.65))
-            ring.lineWidth = 1.3
+    static let size: CGFloat = 18
+
+    private static func make(_ mood: Dot) -> NSImage {
+        let img = NSImage(size: NSSize(width: size, height: size), flipped: false) { _ in
+            guard let cg = NSGraphicsContext.current?.cgContext else { return false }
+            let head = NSRect(x: 2, y: 2, width: 14, height: 14)
             NSColor.black.set()
-            switch kind {
-            case 1:
-                NSBezierPath(ovalIn: c).fill()
-            case 2:
+            switch mood {
+            case .asleep, .working:
+                let ring = NSBezierPath(ovalIn: head.insetBy(dx: 0.75, dy: 0.75))
+                ring.lineWidth = 1.5
                 ring.stroke()
-                NSGraphicsContext.saveGraphicsState()
-                NSRect(x: c.minX, y: c.minY, width: c.width / 2, height: c.height).clip()
-                NSBezierPath(ovalIn: c).fill()
-                NSGraphicsContext.restoreGraphicsState()
-            default:
-                ring.stroke()
+            case .done, .needs:
+                NSBezierPath(ovalIn: head).fill()
+                cg.setBlendMode(.clear)  // eyes are cut out of the disc
+            }
+            let eyes: [CGFloat] = [6.5, 11.5], y: CGFloat = 9.3
+            for x in eyes {
+                switch mood {
+                case .asleep: lid(x < 9 ? x - 0.4 : x + 0.4, y, curve: -1.3, half: 1.35).stroke()  // ‿ closed
+                case .done: lid(x, y - 0.7, curve: 1.6).stroke()      // ^ happy
+                case .working: NSBezierPath(ovalIn: NSRect(x: x - 1, y: y - 1.4, width: 2, height: 2.8)).fill()
+                case .needs: NSBezierPath(ovalIn: NSRect(x: x - 1.55, y: y - 1.55, width: 3.1, height: 3.1)).fill()
+                }
             }
             return true
         }
         img.isTemplate = true
         return img
     }
-    static let empty = make(0), done = make(1), needs = make(2)
+
+    private static func lid(_ x: CGFloat, _ y: CGFloat, curve: CGFloat, half: CGFloat = 1.6) -> NSBezierPath {
+        let p = NSBezierPath()
+        p.move(to: NSPoint(x: x - half, y: y))
+        p.curve(to: NSPoint(x: x + half, y: y), controlPoint1: NSPoint(x: x - 0.9, y: y + curve),
+                controlPoint2: NSPoint(x: x + 0.9, y: y + curve))
+        p.lineWidth = 1.4
+        p.lineCapStyle = .round
+        return p
+    }
+
+    static let asleep = make(.asleep), working = make(.working), done = make(.done(0)), needs = make(.needs)
 }
 
 final class GlyphView: NSView {
@@ -784,7 +820,11 @@ final class RowView: NSView {
     /// `lines`: how many lines of Claude's message to show (the card shows 2).
     init(_ s: Session, label: String, now: Date, pulse: Bool, lines: Int = 1) {
         session = s
-        detailText = s.state == .running ? "" : s.message
+        switch (s.state, s.agents) {
+        case (.running, 0): detailText = ""
+        case (.running, let n): detailText = n == 1 ? "1 subagent still working" : "\(n) subagents still working"
+        default: detailText = s.message
+        }
         time = makeLabel(Self.timeText(s, now), size: 11.5, color: Palette.secondary, digits: true)
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
@@ -1210,9 +1250,46 @@ func panelRows(_ sessions: [String: Session], card: [String]?, now: Date,
     return rows
 }
 
+/// The four faces on a menu-bar-colored strip: real size (2x pixels) on top,
+/// zoomed below. Writes dots-light.png and dots-dark.png.
+private func renderDotPreviews(to dir: String) {
+    let faces: [(NSImage, String)] = [(DotImage.asleep, ""), (DotImage.working, ""), (DotImage.done, " 2"), (DotImage.needs, "")]
+    for (look, bar, ink) in [("light", NSColor(hex: 0xECECEC), NSColor.black), ("dark", NSColor(hex: 0x262626), NSColor.white)] {
+        let zoom: CGFloat = 6, scale: CGFloat = 2, gap: CGFloat = 44
+        let size = NSSize(width: gap * 4 + 24, height: 44 + DotImage.size * zoom + 24)
+        let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width * scale), pixelsHigh: Int(size.height * scale),
+                                   bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                   colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        rep.size = size
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        bar.setFill()
+        NSRect(origin: .zero, size: size).fill()
+        for (i, (img, title)) in faces.enumerated() {
+            let tinted = NSImage(size: img.size, flipped: false) { r in
+                img.draw(in: r)
+                ink.set()
+                r.fill(using: .sourceAtop)
+                return true
+            }
+            let x = 12 + CGFloat(i) * gap
+            tinted.draw(in: NSRect(x: x, y: size.height - 13 - DotImage.size, width: DotImage.size, height: DotImage.size))
+            NSAttributedString(string: title, attributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium),
+                                                           .foregroundColor: ink])
+                .draw(at: NSPoint(x: x + DotImage.size, y: size.height - 13 - DotImage.size + 2))
+            let zx = 12 + CGFloat(i) * (DotImage.size * zoom + 0) * 0.0 + CGFloat(i) * gap
+            tinted.draw(in: NSRect(x: zx, y: 12, width: DotImage.size * zoom * 0.4, height: DotImage.size * zoom * 0.4))
+        }
+        NSGraphicsContext.restoreGraphicsState()
+        try? rep.representation(using: .png, properties: [:])?
+            .write(to: URL(fileURLWithPath: dir).appendingPathComponent("dots-\(look).png"))
+    }
+}
+
 /// Developer aid: `blink --preview <dir>` renders the card, the panel and
 /// the first-run hint, light and dark, to PNGs (no screen recording needed).
 func renderPreviews(to dir: String) {
+    renderDotPreviews(to: dir)
     let now = Date()
     let sample = [
         Session(id: "1", state: .done, projectDir: "/x/proj",
@@ -1223,7 +1300,7 @@ func renderPreviews(to dir: String) {
         Session(id: "3", state: .running, projectDir: "/x/sim", label: "Run the parameter sweep",
                 since: now.addingTimeInterval(-720)),
         Session(id: "4", state: .running, projectDir: "/x/sim", label: "Plot the phase diagram",
-                since: now.addingTimeInterval(-95)),
+                since: now.addingTimeInterval(-95), agents: 2),
         Session(id: "5", state: .done, projectDir: "/x/website", message: "Shipped the new landing page copy.",
                 since: now.addingTimeInterval(-3 * 3600)),
     ]
@@ -1367,7 +1444,8 @@ final class Controller: NSObject {
         guard let b = item.button else { return }
         let all = Array(store.sessions.values)
         switch dot(for: all) {
-        case .empty: b.image = DotImage.empty; b.title = ""
+        case .asleep: b.image = DotImage.asleep; b.title = ""
+        case .working: b.image = DotImage.working; b.title = ""
         case .needs: b.image = DotImage.needs; b.title = ""
         case .done(let n): b.image = DotImage.done; b.title = " \(n)"
         }

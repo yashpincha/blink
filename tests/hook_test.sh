@@ -35,6 +35,16 @@ run done '{"last_assistant_message":"All set."}'
 ok 'head1 | grep -q "^done	" && grep -q "All set." "$D/s1.state"' "done with message"
 run idle '{"notification_type":"idle_prompt"}'
 ok 'head1 | grep -q "^done	"' "idle_prompt keeps done"
+
+run running '{"prompt":"spawn agents"}'
+run done '{"last_assistant_message":"Started.","background_tasks":[{"id":"a1","type":"subagent","status":"running"}]}'
+ok 'head1 | grep -q "^agents	" && grep -q background_tasks "$D/s1.state"' "Stop with a background subagent: agents"
+run idle '{"notification_type":"idle_prompt"}'
+ok 'head1 | grep -q "^agents	"' "idle_prompt ignored while agents work"
+run done '{"last_assistant_message":"Server up.","background_tasks":[{"id":"b1","type":"shell","status":"running"}]}'
+ok 'head1 | grep -q "^done	"' "background shell only: done"
+run done '{"last_assistant_message":"All agents back.","background_tasks":[]}'
+ok 'head1 | grep -q "^done	" && grep -q "All agents back." "$D/s1.state"' "agents finished: done"
 run tool '{}'
 ok 'head1 | grep -q "^done	"' "tool keeps done"
 

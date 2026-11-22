@@ -40,6 +40,13 @@ check(question?.message == "Which database?" && question?.host == .terminal, "qu
 let tool = parseSession(id: "t", contents: file("running\t9\tcli\tApple_Terminal\t\t\t/p/x"), mtime: t0)
 check(tool?.state == .running && tool?.message == "", "metadata-only file")
 
+let waiting = parseSession(
+    id: "w", contents: file("agents\t1\tcli\tvscode\t\t\t/p/proj",
+                            #"{"last_assistant_message":"Kicked off 2 agents.","background_tasks":[{"id":"a1","type":"subagent","status":"running","agent_type":"Explore"},{"id":"w1","type":"workflow","status":"running"},{"id":"b1","type":"shell","status":"running","command":"npm run dev"}]}"#),
+    mtime: t0)
+check(waiting?.state == .running && waiting?.agents == 2 && waiting?.message == "",
+      "stopped with background agents: running, 2 agents (shell not counted)")
+check(dot(for: [waiting!]) == .working, "waiting on agents: dot is working")
 check(parseSession(id: "x", contents: file("bogus\t1"), mtime: t0) == nil, "unknown state rejected")
 check(parseSession(id: "x", contents: Data(), mtime: t0) == nil, "empty file rejected")
 
@@ -72,8 +79,9 @@ check(summaryLine([s("1", .done), s("2", .done), s("3", .running), s("4", .needs
       == "2 done · 1 running · 1 needs you", "summary line")
 check(summaryLine([s("1", .idle)]) == "No active sessions", "idle not counted")
 
-check(dot(for: []) == .empty, "empty dot")
-check(dot(for: [s("1", .running)]) == .empty, "running only → hollow")
+check(dot(for: []) == .asleep, "nothing → asleep")
+check(dot(for: [s("1", .idle)]) == .asleep, "idle only → asleep")
+check(dot(for: [s("1", .running)]) == .working, "running only → working")
 check(dot(for: [s("1", .done), s("2", .done), s("3", .running)]) == .done(2), "done count")
 check(dot(for: [s("1", .done), s("2", .needs)]) == .needs, "needs wins")
 

@@ -1,0 +1,54 @@
+#!/bin/sh
+# End-to-end tests for hooks/hook.sh against a temporary HOME.
+set -u
+cd "$(dirname "$0")/.."
+HOOK="$PWD/hooks/hook.sh"
+T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+D="$T/.claude/blink/sessions"
+fails=0
+ok()   { if eval "$1"; then :; else echo "FAIL: $2"; fails=$((fails+1)); fi; }
+run()  { # run <event> <json> [extra env...]
+  ev=$1; json=$2; shift 2
+  printf '%s' "$json" | env -i HOME="$T" PATH=/usr/bin:/bin CLAUDE_CODE_SESSION_ID=s1 CLAUDE_PID=4242 \
+    CLAUDE_CODE_ENTRYPOINT=cli TERM_PROGRAM=vscode CLAUDE_CODE_SSE_PORT=29005 \
+    __CFBundleIdentifier=com.microsoft.VSCode CLAUDE_PROJECT_DIR=/p/proj "$@" sh "$HOOK" "$ev"
+}
+head1() { IFS= read -r l < "$D/s1.state"; printf '%s' "$l"; }
+
+run running '{"prompt":"first prompt"}'
+ok '[ "$(head1)" = "running	4242	cli	vscode	29005	com.microsoft.VSCode	/p/proj" ]' "running writes metadata line"
+ok 'grep -q "first prompt" "$D/s1.first"' "first prompt saved"
+run running '{"prompt":"second prompt"}'
+ok 'grep -q "first prompt" "$D/s1.first"' ".first keeps the first prompt"
+ok 'grep -q "second prompt" "$D/s1.state"' "state has latest payload"
+
+run tool '{"tool_name":"Bash","tool_response":"BIG"}'
+ok 'grep -q "second prompt" "$D/s1.state"' "tool while running: no write"
+
+run needs '{"message":"Claude needs your permission to use Bash"}'
+ok 'head1 | grep -q "^needs	"' "needs"
+run tool '{"tool_name":"Bash","tool_response":"BIG"}'
+ok 'head1 | grep -q "^running	"' "tool after needs: running"
+ok '! grep -q BIG "$D/s1.state"' "tool payload not stored"
+
+run done '{"last_assistant_message":"All set."}'
+ok 'head1 | grep -q "^done	" && grep -q "All set." "$D/s1.state"' "done with message"
+run idle '{"notification_type":"idle_prompt"}'
+ok 'head1 | grep -q "^done	"' "idle_prompt keeps done"
+run tool '{}'
+ok 'head1 | grep -q "^done	"' "tool keeps done"
+
+run running '{"prompt":"third"}'
+run idle '{"notification_type":"idle_prompt"}'
+ok 'head1 | grep -q "^idle	"' "idle_prompt clears stale running (after an interrupt)"
+
+run running '{"prompt":"x"}' CLAUDE_CODE_ENTRYPOINT=sdk-cli CLAUDE_CODE_SESSION_ID=s2
+ok '[ ! -f "$D/s2.state" ]' "non-interactive sessions ignored"
+run done '{}' CLAUDE_CODE_SESSION_ID=
+ok '[ "$(ls -A "$D" | wc -l | tr -d " ")" = 2 ]' "no session id: nothing written"
+ok '[ -z "$(ls -A "$D" | grep "^\.")" ]' "no temp files left behind"
+
+run end '{"reason":"prompt_input_exit"}'
+ok '[ ! -f "$D/s1.state" ] && [ ! -f "$D/s1.first" ]' "end removes files"
+
+[ $fails -eq 0 ] && echo "All hook tests passed." || { echo "$fails hook test(s) failed."; exit 1; }

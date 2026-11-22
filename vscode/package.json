@@ -1,0 +1,13 @@
+{
+  "name": "blink",
+  "displayName": "blink",
+  "description": "Lets the blink menu bar app jump to the terminal running a Claude Code session.",
+  "version": "0.1.0",
+  "publisher": "yashpincha",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/yashpincha/blink" },
+  "engines": { "vscode": "^1.75.0" },
+  "categories": ["Other"],
+  "activationEvents": ["onUri"],
+  "main": "./extension.js"
+}

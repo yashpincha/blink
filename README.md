@@ -53,7 +53,9 @@ Then:
   looking at. Without it, everything else still works.
 - On your first click on a VS Code session, VS Code asks to let blink
   open a link; tick "Don't ask again". On your first Terminal.app click,
-  allow blink to control Terminal.
+  allow blink to control Terminal. It only uses that to switch tabs: it
+  never types, runs commands, or reads what's in your tabs (the whole
+  script is `terminalSource` in `Sources/blink.swift`).
 
 To update, run `git pull && ./install.sh`. To remove everything, run
 `./uninstall.sh` (`--keep-cert` keeps the signing certificate).

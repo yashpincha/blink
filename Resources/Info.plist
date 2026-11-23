@@ -13,6 +13,6 @@
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSAppleEventsUsageDescription</key>
-  <string>blink switches to the Terminal tab that runs your Claude Code session.</string>
+  <string>blink only uses this to switch to the Terminal tab where your Claude Code session is running. It never types, runs commands, or reads what's in your tabs.</string>
 </dict>
 </plist>

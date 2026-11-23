@@ -1,2 +1,5 @@
-build/
+build/*
+!build/build.sh
+!build/install.sh
+!build/uninstall.sh
 .DS_Store

@@ -1,4 +1,4 @@
-// Run with ./build.sh test
+// Run with build/build.sh test
 import Foundation
 
 var failures = 0
@@ -202,7 +202,7 @@ do {
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
         p.arguments = ["-c", #"mkdir -p "$HOME/.claude/blink" && ln -sfn "$DIR" "$HOME/.claude/blink/sessions" && echo '{}' | sh "$HOOK" "$EV""#]
         p.environment = ["HOME": dir.appendingPathComponent("home").path, "DIR": dir.path,
-                         "HOOK": fm.currentDirectoryPath + "/hooks/hook.sh", "EV": event,
+                         "HOOK": fm.currentDirectoryPath + "/ancillary/hook.sh", "EV": event,
                          "CLAUDE_CODE_SESSION_ID": id, "CLAUDE_PID": "\(getpid())",
                          "CLAUDE_CODE_ENTRYPOINT": "cli", "PATH": "/usr/bin:/bin"]
         try! p.run()

@@ -1,7 +1,7 @@
 #!/bin/sh
 # Installs or updates blink. Safe to re-run.
 set -eu
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 APPS="$HOME/Applications"
 DATA="$HOME/.claude/blink"
 SETTINGS="$HOME/.claude/settings.json"
@@ -36,7 +36,7 @@ fi
 
 # 2. Build and install the app.
 say "Building"
-./build.sh >/dev/null
+build/build.sh >/dev/null
 pkill -x blink 2>/dev/null || true
 mkdir -p "$APPS"
 rm -rf "$APPS/blink.app"
@@ -46,19 +46,19 @@ echo "    $APPS/blink.app"
 # 3. Hook script and settings.json hooks (original backed up once).
 say "Adding Claude Code hooks"
 mkdir -p "$DATA/sessions"
-cp hooks/hook.sh "$DATA/hook.sh"
+cp ancillary/hook.sh "$DATA/hook.sh"
 chmod +x "$DATA/hook.sh"
 mkdir -p "$(dirname "$SETTINGS")"
 [ -s "$SETTINGS" ] || echo '{}' > "$SETTINGS"
 [ -f "$SETTINGS.bak-blink" ] || cp "$SETTINGS" "$SETTINGS.bak-blink"
-jq -f scripts/hooks-add.jq "$SETTINGS" > "$SETTINGS.tmp-blink"
+jq -f ancillary/hooks-add.jq "$SETTINGS" > "$SETTINGS.tmp-blink"
 mv "$SETTINGS.tmp-blink" "$SETTINGS"
 echo "    $SETTINGS (original saved as settings.json.bak-blink)"
 
 # 4. VS Code helper: focuses the exact terminal tab.
 if command -v code >/dev/null; then
   say "Installing the VS Code helper extension"
-  ./build.sh vsix >/dev/null
+  build/build.sh vsix >/dev/null
   code --install-extension build/blink.vsix --force >/dev/null 2>&1 \
     || echo "    (couldn't install it; clicks on VS Code terminal sessions will raise the window only)"
 fi

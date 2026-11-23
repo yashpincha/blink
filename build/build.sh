@@ -1,10 +1,10 @@
 #!/bin/sh
 # Build blink.
-#   ./build.sh          build build/blink.app (signed with the local "blink" identity if present)
-#   ./build.sh test     run the unit tests and the hook tests
-#   ./build.sh vsix     package the VS Code companion extension
+#   build/build.sh          build build/blink.app (signed with the local "blink" identity if present)
+#   build/build.sh test     run the unit tests and the hook tests
+#   build/build.sh vsix     package the VS Code companion extension
 set -eu
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 # Command Line Tools can carry newer SDKs than their compiler understands;
 # CommandLineTools/SDKs/MacOSX.sdk is the one that matches. Override with SDK=...
 CLT=/Library/Developer/CommandLineTools
@@ -25,22 +25,27 @@ fi
 case "${1:-app}" in
   test)
     mkdir -p build
-    swiftc $FLAGS -D TESTING Sources/blink.swift tests/main.swift -o build/tests
+    # Swift only runs top-level code from a file named main.swift.
+    cp ancillary/tests.swift build/main.swift
+    swiftc $FLAGS -D TESTING blink.swift build/main.swift -o build/tests
     ./build/tests
-    sh tests/hook_test.sh
+    sh ancillary/hook_test.sh
     ;;
   vsix)
     rm -rf build/vsix && mkdir -p build/vsix/extension
-    cp vscode/package.json vscode/extension.js LICENSE build/vsix/extension/
-    cp vscode/extension.vsixmanifest "vscode/[Content_Types].xml" build/vsix/
+    cp ancillary/vscode-package.json build/vsix/extension/package.json
+    cp ancillary/vscode-extension.js build/vsix/extension/extension.js
+    cp LICENSE build/vsix/extension/
+    cp ancillary/vscode.vsixmanifest build/vsix/extension.vsixmanifest
+    cp ancillary/vscode-content-types.xml "build/vsix/[Content_Types].xml"
     (cd build/vsix && rm -f ../blink.vsix && zip -qrX ../blink.vsix "[Content_Types].xml" extension.vsixmanifest extension)
     echo "build/blink.vsix"
     ;;
   app)
     APP=build/blink.app
     rm -rf "$APP" && mkdir -p "$APP/Contents/MacOS"
-    cp Resources/Info.plist "$APP/Contents/Info.plist"
-    swiftc $FLAGS -O -wmo -parse-as-library Sources/blink.swift -o "$APP/Contents/MacOS/blink"
+    cp ancillary/Info.plist "$APP/Contents/Info.plist"
+    swiftc $FLAGS -O -wmo -parse-as-library blink.swift -o "$APP/Contents/MacOS/blink"
     if security find-identity -p codesigning 2>/dev/null | grep -q '"blink"'; then
       out=$(codesign --force --sign blink --identifier com.yashpincha.blink "$APP" 2>&1) || { echo "$out" >&2; exit 1; }
     else

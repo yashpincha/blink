@@ -1,14 +1,14 @@
 #!/bin/sh
 # Remove everything install.sh added. Pass --keep-cert to keep the signing certificate.
 set -u
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 APP="$HOME/Applications/blink.app"
 SETTINGS="$HOME/.claude/settings.json"
 
 pkill -x blink 2>/dev/null
 [ -x "$APP/Contents/MacOS/blink" ] && "$APP/Contents/MacOS/blink" --unregister-login
 if [ -f "$SETTINGS" ] && command -v jq >/dev/null; then
-  jq -f scripts/hooks-remove.jq "$SETTINGS" > "$SETTINGS.tmp-blink" && mv "$SETTINGS.tmp-blink" "$SETTINGS" \
+  jq -f ancillary/hooks-remove.jq "$SETTINGS" > "$SETTINGS.tmp-blink" && mv "$SETTINGS.tmp-blink" "$SETTINGS" \
     && rm -f "$SETTINGS.bak-blink"
 fi
 rm -rf "$APP" "$HOME/.claude/blink"

@@ -1,4 +1,4 @@
-// blink: a menu bar dot for Claude Code sessions. hooks/hook.sh writes one
+// blink: a menu bar dot for Claude Code sessions. ancillary/hook.sh writes one
 // file per session to ~/.claude/blink/sessions; this app watches that folder.
 
 import AppKit
@@ -1289,92 +1289,6 @@ func panelRows(_ sessions: [String: Session], card: [String]?, now: Date,
     return rows
 }
 
-private func renderDotPreviews(to dir: String) {
-    let faces: [(NSImage, String)] = [(DotImage.empty, ""), (DotImage.done, " 2"), (DotImage.needs, "")]
-    for (look, bar, ink) in [("light", NSColor(hex: 0xECECEC), NSColor.black), ("dark", NSColor(hex: 0x262626), NSColor.white)] {
-        let zoom: CGFloat = 6, scale: CGFloat = 2, gap: CGFloat = 44
-        let size = NSSize(width: gap * 4 + 24, height: 44 + DotImage.size * zoom + 24)
-        let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width * scale), pixelsHigh: Int(size.height * scale),
-                                   bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
-                                   colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
-        rep.size = size
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
-        bar.setFill()
-        NSRect(origin: .zero, size: size).fill()
-        for (i, (img, title)) in faces.enumerated() {
-            let tinted = NSImage(size: img.size, flipped: false) { r in
-                img.draw(in: r)
-                ink.set()
-                r.fill(using: .sourceAtop)
-                return true
-            }
-            let x = 12 + CGFloat(i) * gap
-            tinted.draw(in: NSRect(x: x, y: size.height - 13 - DotImage.size, width: DotImage.size, height: DotImage.size))
-            NSAttributedString(string: title, attributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .medium),
-                                                           .foregroundColor: ink])
-                .draw(at: NSPoint(x: x + DotImage.size, y: size.height - 13 - DotImage.size + 1))
-            let zx = 12 + CGFloat(i) * (DotImage.size * zoom + 0) * 0.0 + CGFloat(i) * gap
-            tinted.draw(in: NSRect(x: zx, y: 12, width: DotImage.size * zoom * 0.4, height: DotImage.size * zoom * 0.4))
-        }
-        NSGraphicsContext.restoreGraphicsState()
-        try? rep.representation(using: .png, properties: [:])?
-            .write(to: URL(fileURLWithPath: dir).appendingPathComponent("dots-\(look).png"))
-    }
-}
-
-/// `blink --preview <dir>` renders the UI to PNGs, light and dark.
-func renderPreviews(to dir: String) {
-    renderDotPreviews(to: dir)
-    let now = Date()
-    let sample = [
-        Session(id: "1", state: .done, projectDir: "/x/proj",
-                message: snippet("## Summary\n\nDone.\nThe cosine schedule with warmup beats step decay by 1.8% on val loss, so I made it the default."),
-                since: now.addingTimeInterval(-240)),
-        Session(id: "2", state: .needs, projectDir: "/x/repo",
-                message: "Claude needs your permission to use Bash", since: now.addingTimeInterval(-30)),
-        Session(id: "3", state: .running, projectDir: "/x/sim", label: "Run the parameter sweep",
-                since: now.addingTimeInterval(-60)),
-        Session(id: "4", state: .running, projectDir: "/x/sim",
-                message: "Subagent working: Write the proj paper", label: "Plot the phase diagram",
-                since: now.addingTimeInterval(-95), background: 1),
-        Session(id: "5", state: .done, projectDir: "/x/website", message: "Shipped the new landing page copy.",
-                since: now.addingTimeInterval(-3 * 3600)),
-    ]
-    let sessions = Dictionary(uniqueKeysWithValues: sample.map { ($0.id, $0) })
-    let kinds: [(String, () -> [NSView])] = [
-        ("card", { panelRows(sessions, card: ["1", "2"], now: now, onOpen: { _ in }, onDismiss: { _ in }) }),
-        ("panel", { panelRows(sessions, card: nil, now: now, onOpen: { _ in }, onDismiss: { _ in }, onClearDone: {}) }),
-        ("hint", { [messageRow(firstRunHint.0, firstRunHint.1)] }),
-    ]
-    for (look, name) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
-        for (kind, rows) in kinds {
-            let panel = DropPanel()
-            panel.appearance = NSAppearance(named: name)
-            panel.update(rows(), under: nil, animate: false)
-            panel.setFrameOrigin(NSPoint(x: -10000, y: -10000))
-            panel.orderFrontRegardless()
-            panel.displayIfNeeded()
-            guard let layer = panel.contentView?.layer else { continue }
-            let pad: CGFloat = 24, scale: CGFloat = 2
-            let size = CGSize(width: panel.frame.width + pad * 2, height: panel.frame.height + pad * 2)
-            guard let ctx = CGContext(data: nil, width: Int(size.width * scale), height: Int(size.height * scale),
-                                      bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { continue }
-            ctx.scaleBy(x: scale, y: scale)
-            ctx.setFillColor(look == "dark" ? NSColor(hex: 0x3A3A3C).cgColor : NSColor(hex: 0xD9D9DE).cgColor)
-            ctx.fill(CGRect(origin: .zero, size: size))
-            ctx.translateBy(x: pad, y: pad)
-            NSAppearance(named: name)?.performAsCurrentDrawingAppearance { layer.render(in: ctx) }
-            if let img = ctx.makeImage(),
-               let png = NSBitmapImageRep(cgImage: img).representation(using: .png, properties: [:]) {
-                try? png.write(to: URL(fileURLWithPath: dir).appendingPathComponent("\(kind)-\(look).png"))
-            }
-            panel.orderOut(nil)
-        }
-    }
-}
-
 // MARK: - Settings
 
 enum Prefs {
@@ -1709,11 +1623,6 @@ enum Main {
         let args = CommandLine.arguments
         if args.contains("--version") { print("blink 0.1.0"); return }
         if args.contains("--unregister-login") { try? SMAppService.mainApp.unregister(); return }
-        if let i = args.firstIndex(of: "--preview"), i + 1 < args.count {
-            _ = NSApplication.shared
-            renderPreviews(to: args[i + 1])
-            return
-        }
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
         let delegate = AppDelegate()

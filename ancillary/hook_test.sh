@@ -1,8 +1,8 @@
 #!/bin/sh
-# End-to-end tests for hooks/hook.sh against a temporary HOME.
+# End-to-end tests for ancillary/hook.sh against a temporary HOME.
 set -u
 cd "$(dirname "$0")/.."
-HOOK="$PWD/hooks/hook.sh"
+HOOK="$PWD/ancillary/hook.sh"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 D="$T/.claude/blink/sessions"
 fails=0

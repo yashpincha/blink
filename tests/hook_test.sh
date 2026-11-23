@@ -55,7 +55,14 @@ run done '{"last_assistant_message":"Done."}'
 run interrupt '{"tool_name":"Bash","is_interrupt":true}'
 ok 'head1 | grep -q "^done	"' "interrupt never touches done"
 run tool '{}'
-ok 'head1 | grep -q "^done	"' "tool keeps done"
+ok 'head1 | grep -q "^running	" && ! grep -q "Done." "$D/s1.state"' "tool after done (a subagent woke Claude): running"
+run done '{"last_assistant_message":"Finished.","background_tasks":[{"id":"a1","type":"subagent","status":"running"}]}'
+run tool '{}'
+ok 'head1 | grep -q "^agents	"' "subagent tools keep agents (count survives)"
+run done '{"last_assistant_message":"Done."}'
+printf 'idle%s' "$(tail -c +5 "$D/s1.state")" > "$D/s1.tmp" && mv "$D/s1.tmp" "$D/s1.state"  # you clicked it away
+run tool '{}'
+ok 'head1 | grep -q "^running	"' "tool after idle (dismissed, then woken): running"
 
 run running '{"prompt":"third"}'
 run idle '{"notification_type":"idle_prompt"}'

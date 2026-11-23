@@ -7,7 +7,9 @@
 #   hook.sh done      Stop, StopFailure                Claude finished its turn (or, if
 #                                                      background agents still work, "agents")
 #   hook.sh needs     Notification (permission prompt, question), PreToolUse AskUserQuestion
-#   hook.sh tool      PostToolUse                      only used to leave "needs"
+#   hook.sh tool      PostToolUse                      back to "running" from needs, done or idle:
+#                                                      Claude (or a subagent) is using tools, even
+#                                                      without a typed prompt (a subagent reported back)
 #   hook.sh idle      Notification idle_prompt         clears a stale state after an interrupt
 #                                                      (never while agents still work)
 #   hook.sh interrupt PostToolUseFailure               you pressed Esc mid-tool: no Stop follows
@@ -29,7 +31,7 @@ case $1 in
     [ -f "$f" ] || exit 0
     IFS= read -r head < "$f"
     case "$1:$head" in
-      tool:needs*) state=running ;;
+      tool:needs*|tool:done*|tool:idle*) state=running ;;
       idle:running*|idle:needs*) state=idle ;;
       interrupt:running*|interrupt:needs*)
         # A failed tool only ends the turn when you interrupted it.

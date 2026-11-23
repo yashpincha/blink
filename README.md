@@ -69,7 +69,7 @@ Claude Code ──hooks──▶ ~/.claude/blink/sessions/<id>.state ──watch
 | `UserPromptSubmit` | `running` |
 | `Stop`, `StopFailure` | `done`, with Claude's last message |
 | `Notification` (`permission_prompt`, `elicitation_*`, `agent_needs_input`), `PreToolUse` `AskUserQuestion` | `needs` |
-| `PostToolUse` | `running` again, but only when leaving `needs` |
+| `PostToolUse` | `running` again after `needs`, `done` or `idle`: Claude or a subagent is using tools, even with no typed prompt (a subagent reported back) |
 | `Notification` `idle_prompt` | `idle`, which clears a stale state after you interrupt Claude |
 | `PostToolUseFailure` | `idle` when you interrupt Claude mid-tool (Esc), since no `Stop` follows |
 | `SessionEnd` | deletes the file |

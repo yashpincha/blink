@@ -185,9 +185,15 @@ do {
     check(store.sessions["two"]?.state == .done, "the other done session stays")
 
     hook("idle", "two")  // Claude Code's ~60 s "waiting for your input" reminder
-    hook("tool", "two")
     store.rescan()
     check(store.sessions["two"]?.state == .done, "still done after idle reminders")
+
+    hook("tool", "one")  // a subagent reports back and Claude works on in session 1, no typed prompt
+    store.rescan()
+    check(store.sessions["one"]?.state == .running && store.sessions["two"]?.state == .done,
+          "session 1 woken by a subagent: running; session 2 untouched")
+    hook("done", "one")
+    store.dismiss("one")
 
     hook("running", "one")  // you send session 1 a new prompt
     store.rescan()

@@ -81,6 +81,12 @@ POSIX `sh` script: on most tool calls it reads one line with shell builtins
 and exits. Only interactive sessions count. `claude -p` and SDK runs are
 ignored.
 
+A turn can also die without any hook firing (Esc before Claude replies, or a
+request lost while the Mac slept). So when the panel opens, a session that has
+been "running" for 30 minutes with nothing new in its transcript, or its
+subagents' transcripts, is treated as idle. Sessions waiting on background
+shells or agents are left alone. Any later event brings a session back.
+
 Jumping to a session:
 
 - **VS Code terminal:** the session's IDE port leads to the extension host

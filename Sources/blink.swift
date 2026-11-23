@@ -28,6 +28,7 @@ struct Session: Equatable {
     var label = ""
     var since = Date()
     var background = 0  // Claude stopped, but still waits on this many background tasks
+    var transcript = ""  // Claude Code's transcript of the session (from the hook payload)
 
     var folder: String {
         let name = (projectDir as NSString).lastPathComponent
@@ -97,7 +98,8 @@ func parseSession(id: String, contents: Data, mtime: Date) -> Session? {
     }
     return Session(id: id, state: state, pid: pid_t(field(1)) ?? 0, entry: field(2), term: field(3),
                    ssePort: field(4), bundleId: field(5), projectDir: dir,
-                   message: snippet(message), since: mtime, background: background)
+                   message: snippet(message), since: mtime, background: background,
+                   transcript: payload["transcript_path"] as? String ?? "")
 }
 
 /// Background work Claude is still waiting on, by Claude Code's type names,
@@ -302,6 +304,38 @@ func bootTime() -> Date {
     return Date(timeIntervalSince1970: TimeInterval(tv.tv_sec))
 }
 
+/// When a session last showed signs of life: the newest timestamped entry in
+/// its transcript, or the newest file its subagents or tools wrote (they live
+/// in a folder next to it). Only the transcript's tail is read. Untimestamped
+/// bookkeeping lines that Claude Code appends to idle sessions don't count.
+func lastActivity(transcript path: String) -> Date? {
+    guard !path.isEmpty else { return nil }
+    var latest: Date?
+    if let h = FileHandle(forReadingAtPath: path) {
+        defer { try? h.close() }
+        let size = (try? h.seekToEnd()) ?? 0
+        let tail: UInt64 = 1 << 20
+        try? h.seek(toOffset: size > tail ? size - tail : 0)
+        let text = String(decoding: (try? h.readToEnd()) ?? Data(), as: UTF8.self)
+        // Inside message text quotes are escaped, so this only matches entry fields.
+        if let r = text.range(of: #""timestamp":""#, options: .backwards),
+           let end = text[r.upperBound...].firstIndex(of: "\"") {
+            let stamp = String(text[r.upperBound..<end])
+            let f = ISO8601DateFormatter()
+            f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            latest = f.date(from: stamp) ?? ISO8601DateFormatter().date(from: stamp)
+        }
+    }
+    let side = URL(fileURLWithPath: (path as NSString).deletingPathExtension)
+    if let files = FileManager.default.enumerator(at: side, includingPropertiesForKeys: [.contentModificationDateKey]) {
+        for case let url as URL in files {
+            if let m = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate,
+               m > (latest ?? .distantPast) { latest = m }
+        }
+    }
+    return latest
+}
+
 // MARK: - Store: watches the sessions folder
 
 final class Store {
@@ -415,13 +449,56 @@ final class Store {
     /// Clears a done (or needs-you) session from the list. It comes back as
     /// running the next time you send it a prompt.
     func dismiss(_ id: String) {
+        setIdle(id)
+        onChange?([])
+    }
+
+    private func setIdle(_ id: String) {
         let url = dir.appendingPathComponent(id + ".state")
         guard var text = try? String(contentsOf: url, encoding: .utf8),
               let end = text.firstIndex(where: { $0 == "\t" || $0 == "\n" }) else { return }
         text.replaceSubrange(text.startIndex..<end, with: SessionState.idle.rawValue)
         try? text.write(to: url, atomically: true, encoding: .utf8)
         sessions[id]?.state = .idle
-        onChange?([])
+    }
+
+    /// A turn can die without any hook firing (Esc before Claude replies, a
+    /// request lost while the Mac slept), leaving its session "running"
+    /// forever. When a session has said nothing for this long, in its
+    /// transcript or its subagents', it's idle. Sessions waiting on background
+    /// work are left alone: a build can be quiet for hours. Any later event
+    /// brings the session back.
+    static let stallAfter: TimeInterval = 30 * 60
+    private var stallChecked: [String: Date] = [:]
+
+    /// Runs when the panel opens, not on a timer. Returns whether anything changed.
+    @discardableResult
+    func expireStalled(now: Date = Date()) -> Bool {
+        var changed = false
+        for s in sessions.values where s.state == .running && s.background == 0
+            && now.timeIntervalSince(s.since) >= Self.stallAfter {
+            if let t = stallChecked[s.id], now.timeIntervalSince(t) < 5 * 60 { continue }
+            stallChecked[s.id] = now
+            // No transcript to go on: leave it be rather than guess.
+            guard let last = lastActivity(transcript: s.transcript.isEmpty ? findTranscript(s.id) : s.transcript),
+                  now.timeIntervalSince(last) >= Self.stallAfter else { continue }
+            setIdle(s.id)
+            changed = true
+        }
+        stallChecked = stallChecked.filter { sessions[$0.key]?.state == .running }
+        return changed
+    }
+
+    /// ~/.claude/projects/<project>/<id>.jsonl, for session files written
+    /// before the hook kept the transcript path.
+    private func findTranscript(_ id: String) -> String {
+        let fm = FileManager.default
+        let root = dir.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("projects")
+        for project in (try? fm.contentsOfDirectory(atPath: root.path)) ?? [] {
+            let f = root.appendingPathComponent(project).appendingPathComponent(id + ".jsonl").path
+            if fm.fileExists(atPath: f) { return f }
+        }
+        return ""
     }
 }
 
@@ -1541,6 +1618,7 @@ final class Controller: NSObject {
     private func show(_ m: Mode) {
         hideWork?.cancel()
         warmTerminalIfNeeded()
+        if m == .summary { store.expireStalled() }
         let wasHidden = mode == .hidden
         mode = m
         render(animate: !wasHidden)

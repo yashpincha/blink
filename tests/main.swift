@@ -171,6 +171,67 @@ check(parentPid(getpid()) == getppid(), "parentPid")
 check(isAlive(getpid()), "self alive")
 check(startTime(getpid()) != nil, "start time")
 
+// MARK: lastActivity and stalled sessions
+
+do {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("blink-stall-\(getpid())")
+    try? fm.removeItem(at: dir)
+    try! fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    let now = Date()
+    let iso = ISO8601DateFormatter()
+    iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    func transcript(_ name: String, lastEntry: Date) -> String {
+        let path = dir.appendingPathComponent(name + ".jsonl").path
+        let lines = [
+            #"{"type":"user","timestamp":"\#(iso.string(from: lastEntry.addingTimeInterval(-60)))","message":{"content":"run it"}}"#,
+            #"{"type":"api-request","timestamp":"\#(iso.string(from: lastEntry))"}"#,
+            // bookkeeping Claude Code appends later: no timestamp, and a quoted one inside text
+            #"{"type":"session-owner","note":"{\"timestamp\":\"2099-01-01T00:00:00.000Z\"}"}"#,
+            #"{"type":"custom-title","customTitle":"x"}"#,
+        ]
+        try! (lines.joined(separator: "\n") + "\n").write(toFile: path, atomically: true, encoding: .utf8)
+        return path
+    }
+    let twoHoursAgo = now.addingTimeInterval(-7200)
+    let deadPath = transcript("dead", lastEntry: twoHoursAgo)
+    let seen = lastActivity(transcript: deadPath)
+    check(seen.map { abs($0.timeIntervalSince(twoHoursAgo)) < 0.01 } == true,
+          "last activity = newest timestamped entry, not bookkeeping: \(String(describing: seen))")
+    check(lastActivity(transcript: dir.appendingPathComponent("missing.jsonl").path) == nil, "no transcript: nil")
+
+    let busyPath = transcript("busy", lastEntry: twoHoursAgo)  // quiet main transcript, subagent at work
+    let sub = dir.appendingPathComponent("busy/subagents")
+    try! fm.createDirectory(at: sub, withIntermediateDirectories: true)
+    try! "{}".write(to: sub.appendingPathComponent("agent-1.jsonl"), atomically: true, encoding: .utf8)
+    check(lastActivity(transcript: busyPath).map { now.timeIntervalSince($0) < 60 } == true, "subagent writes count")
+
+    let sessions = dir.appendingPathComponent("sessions")
+    try! fm.createDirectory(at: sessions, withIntermediateDirectories: true)
+    func write(_ id: String, _ state: String, _ path: String, extra: String = "") {
+        let url = sessions.appendingPathComponent("\(id).state")
+        try! Data("\(state)\t\(getpid())\tcli\tvscode\t\t\t/p/\(id)\n{\"transcript_path\":\"\(path)\"\(extra)}".utf8).write(to: url)
+        try! fm.setAttributes([.modificationDate: twoHoursAgo], ofItemAtPath: url.path)
+    }
+    write("dead", "running", deadPath)
+    write("busy", "running", busyPath)
+    write("waits", "agents", deadPath, extra: #","background_tasks":[{"type":"shell","status":"running"}]"#)
+    write("lost", "running", "")
+    let fresh = transcript("fresh", lastEntry: now.addingTimeInterval(-60))
+    write("fresh", "running", fresh)
+    let store = Store(dir: sessions)
+    store.rescan(initial: true)
+    check(store.expireStalled(now: now), "something expired")
+    check(store.sessions["dead"]?.state == .idle, "silent for 2 h: idle")
+    check(store.sessions["busy"]?.state == .running, "subagent still writing: running")
+    check(store.sessions["fresh"]?.state == .running, "spoke a minute ago: running")
+    check(store.sessions["waits"]?.state == .running, "waiting on background work: left alone")
+    check(store.sessions["lost"]?.state == .running, "no transcript found: left alone")
+    store.rescan()
+    check(store.sessions["dead"]?.state == .idle, "idle written to disk")
+    check(!store.expireStalled(now: now), "second look within 5 min: nothing")
+    try? fm.removeItem(at: dir)
+}
+
 // MARK: Store: opening one done session leaves the others alone
 
 do {

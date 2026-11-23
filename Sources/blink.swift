@@ -79,7 +79,9 @@ func parseSession(id: String, contents: Data, mtime: Date) -> Session? {
             message = q
         }
     case .running:
-        message = waiting ? "" : payload["prompt"] as? String ?? ""
+        // Typed prompt: no detail (you know what you asked). Woken without a
+        // prompt (a subagent reported back): what Claude last said.
+        message = payload["last_assistant_message"] as? String ?? ""
     case .idle:
         break
     }
@@ -87,8 +89,12 @@ func parseSession(id: String, contents: Data, mtime: Date) -> Session? {
     if dir.isEmpty { dir = payload["cwd"] as? String ?? "" }
     var agents = 0
     if waiting {
-        let tasks = payload["background_tasks"] as? [[String: Any]] ?? []
-        agents = max(1, tasks.filter { agentTaskTypes.contains($0["type"] as? String ?? "") }.count)
+        let tasks = (payload["background_tasks"] as? [[String: Any]] ?? [])
+            .filter { agentTaskTypes.contains($0["type"] as? String ?? "") }
+        agents = max(1, tasks.count)
+        let what = tasks.compactMap { $0["description"] as? String }.filter { !$0.isEmpty }
+        let lead = agents == 1 ? "Subagent working" : "\(agents) subagents working"
+        message = what.isEmpty ? lead : lead + ": " + what.joined(separator: ", ")
     }
     return Session(id: id, state: state, pid: pid_t(field(1)) ?? 0, entry: field(2), term: field(3),
                    ssePort: field(4), bundleId: field(5), projectDir: dir,
@@ -101,7 +107,17 @@ let agentTaskTypes: Set<String> = ["subagent", "workflow", "teammate", "cloud se
 
 /// The first prompt of a session (from its `.first` file), shortened.
 func parseLabel(_ contents: Data) -> String {
-    snippet(splitFile(contents)?.payload["prompt"] as? String ?? "", max: 40)
+    snippet(typedText(splitFile(contents)?.payload["prompt"] as? String ?? ""), max: 40)
+}
+
+/// The part of a prompt you typed: pasted blocks dropped, and nothing at all
+/// for messages Claude Code delivers as prompts (a subagent reporting back,
+/// task notifications, slash-command output), which start with a tag.
+func typedText(_ prompt: String) -> String {
+    let t = prompt.replacingOccurrences(of: #"<pasted_content[^>]*>[\s\S]*?</pasted_content[^>]*>"#, with: " ",
+                                        options: .regularExpression)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    return t.hasPrefix("<") ? "" : t
 }
 
 /// The most telling line of a markdown-ish message, without the markup. Skips
@@ -801,11 +817,7 @@ final class RowView: NSView {
     /// `lines`: how many lines of Claude's message to show (the card shows 2).
     init(_ s: Session, label: String, now: Date, pulse: Bool, lines: Int = 1) {
         session = s
-        switch (s.state, s.agents) {
-        case (.running, 0): detailText = ""
-        case (.running, let n): detailText = n == 1 ? "1 subagent still working" : "\(n) subagents still working"
-        default: detailText = s.message
-        }
+        detailText = s.message
         time = makeLabel(Self.timeText(s, now), size: 11.5, color: Palette.secondary, digits: true)
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
@@ -1279,9 +1291,10 @@ func renderPreviews(to dir: String) {
         Session(id: "2", state: .needs, projectDir: "/x/repo",
                 message: "Claude needs your permission to use Bash", since: now.addingTimeInterval(-30)),
         Session(id: "3", state: .running, projectDir: "/x/sim", label: "Run the parameter sweep",
-                since: now.addingTimeInterval(-720)),
-        Session(id: "4", state: .running, projectDir: "/x/sim", label: "Plot the phase diagram",
-                since: now.addingTimeInterval(-95), agents: 2),
+                since: now.addingTimeInterval(-60)),
+        Session(id: "4", state: .running, projectDir: "/x/sim",
+                message: "Subagent working: Write the proj paper", label: "Plot the phase diagram",
+                since: now.addingTimeInterval(-95), agents: 1),
         Session(id: "5", state: .done, projectDir: "/x/website", message: "Shipped the new landing page copy.",
                 since: now.addingTimeInterval(-3 * 3600)),
     ]

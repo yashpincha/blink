@@ -61,9 +61,18 @@ tmp="$dir/.$sid.$$"
   case $1 in
     done) printf '%s\n' "$payload" ;;
     running|needs) cat ;;
+    *) tail -n +2 "$f" ;;  # tool, idle, interrupt: keep what Claude last said
   esac
 } > "$tmp" && mv -f "$tmp" "$f"
 
-# Remember the first prompt; it labels sessions that share a folder.
-if [ "$1" = running ] && [ ! -f "$dir/$sid.first" ]; then cp "$f" "$dir/$sid.first"; fi
+# Remember the first prompt you typed; it labels sessions that share a folder.
+# Skip messages Claude Code delivers as prompts (a subagent reporting back,
+# task notifications), which start with a tag; a pasted block is still yours.
+typed() { # typed <file>: is line 2's prompt something you typed?
+  [ -f "$1" ] || return 1
+  p=
+  { IFS= read -r _; IFS= read -r p; } < "$1"  # the payload has no trailing newline
+  case $p in *'"prompt":"<pasted_content'*) return 0 ;; *'"prompt":"<'*) return 1 ;; esac
+}
+if [ "$1" = running ] && typed "$f" && ! typed "$dir/$sid.first"; then cp "$f" "$dir/$sid.first"; fi
 exit 0

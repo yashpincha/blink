@@ -44,8 +44,22 @@ let waiting = parseSession(
     id: "w", contents: file("agents\t1\tcli\tvscode\t\t\t/p/proj",
                             #"{"last_assistant_message":"Kicked off 2 agents.","background_tasks":[{"id":"a1","type":"subagent","status":"running","agent_type":"Explore"},{"id":"w1","type":"workflow","status":"running"},{"id":"b1","type":"shell","status":"running","command":"npm run dev"}]}"#),
     mtime: t0)
-check(waiting?.state == .running && waiting?.agents == 2 && waiting?.message == "",
+check(waiting?.state == .running && waiting?.agents == 2,
       "stopped with background agents: running, 2 agents (shell not counted)")
+check(waiting?.message == "2 subagents working", "agents note: \(waiting?.message ?? "nil")")
+let paper = parseSession(
+    id: "p", contents: file("agents\t1\tcli\tvscode\t\t\t/p/aw",
+                            #"{"background_tasks":[{"id":"a1","type":"subagent","status":"running","description":"Write the proj paper"}]}"#),
+    mtime: t0)
+check(paper?.message == "Subagent working: Write the proj paper", "agents note names the task: \(paper?.message ?? "nil")")
+let woken = parseSession(id: "k", contents: file("running\t1\tcli\tvscode\t\t\t/p/aw",
+                                                 #"{"last_assistant_message":"A subagent is writing the paper."}"#), mtime: t0)
+check(woken?.message == "A subagent is writing the paper.", "woken without a prompt: Claude's last words")
+let typedRun = parseSession(id: "r", contents: file("running\t1\tcli\tvscode\t\t\t/p/aw", #"{"prompt":"Fix it"}"#), mtime: t0)
+check(typedRun?.message == "", "typed prompt: no detail")
+check(typedText(#"<agent-message from="a3d5">done</agent-message>"#) == "", "agent message isn't typed")
+check(typedText("<pasted_content id=\"1\">\nlots\n</pasted_content id=\"1\">\nsummarize this") == "summarize this", "paste dropped, typed kept")
+check(typedText("plain words") == "plain words", "plain prompt")
 check(dot(for: [waiting!]) == .empty, "waiting on agents: not done yet")
 check(parseSession(id: "x", contents: file("bogus\t1"), mtime: t0) == nil, "unknown state rejected")
 check(parseSession(id: "x", contents: Data(), mtime: t0) == nil, "empty file rejected")

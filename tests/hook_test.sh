@@ -20,6 +20,17 @@ ok '[ "$(head1)" = "running	4242	cli	vscode	29005	com.microsoft.VSCode	/p/proj" 
 ok 'grep -q "first prompt" "$D/s1.first"' "first prompt saved"
 run running '{"prompt":"second prompt"}'
 ok 'grep -q "first prompt" "$D/s1.first"' ".first keeps the first prompt"
+run end '{}'
+run running '{"prompt":"<agent-message from=\"a1\">report</agent-message>"}'
+ok '[ ! -f "$D/s1.first" ]' "agent message doesn't become the label"
+run running '{"prompt":"<pasted_content id=\"1\">x</pasted_content id=\"1\"> summarize"}'
+ok 'grep -q summarize "$D/s1.first"' "pasted prompt is yours: label"
+run end '{}'
+printf 'running\t1\n{"prompt":"<agent-message from=\\"a\\">x</agent-message>"}\n' > "$D/s1.first"
+run running '{"prompt":"first prompt"}'
+ok 'grep -q "first prompt" "$D/s1.first"' "a bad label is replaced by the first typed prompt"
+run running '{"prompt":"second prompt"}'
+ok 'grep -q "first prompt" "$D/s1.first"' "then it sticks"
 ok 'grep -q "second prompt" "$D/s1.state"' "state has latest payload"
 
 run tool '{"tool_name":"Bash","tool_response":"BIG"}'
@@ -55,7 +66,7 @@ run done '{"last_assistant_message":"Done."}'
 run interrupt '{"tool_name":"Bash","is_interrupt":true}'
 ok 'head1 | grep -q "^done	"' "interrupt never touches done"
 run tool '{}'
-ok 'head1 | grep -q "^running	" && ! grep -q "Done." "$D/s1.state"' "tool after done (a subagent woke Claude): running"
+ok 'head1 | grep -q "^running	" && grep -q "Done." "$D/s1.state"' "tool after done (a subagent woke Claude): running, keeps Claude's last words"
 run done '{"last_assistant_message":"Finished.","background_tasks":[{"id":"a1","type":"subagent","status":"running"}]}'
 run tool '{}'
 ok 'head1 | grep -q "^agents	"' "subagent tools keep agents (count survives)"

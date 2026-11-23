@@ -1,15 +1,11 @@
-// blink: a tiny menu bar dot that tells you when Claude Code sessions are done.
-//
-// Claude Code hooks (hooks/hook.sh) keep one small file per session in
-// ~/.claude/blink/sessions. This app watches that folder (no polling),
-// shows a dot in the menu bar, drops a card under it when a session is done or
-// needs you, and jumps to the session's window or tab when you click it.
+// blink: a menu bar dot for Claude Code sessions. hooks/hook.sh writes one
+// file per session to ~/.claude/blink/sessions; this app watches that folder.
 
 import AppKit
 import ApplicationServices
 import ServiceManagement
 
-// MARK: - Model (pure; covered by tests/main.swift)
+// MARK: - Model
 
 enum SessionState: String { case running, done, needs, idle }
 
@@ -27,8 +23,8 @@ struct Session: Equatable {
     var message = ""
     var label = ""
     var since = Date()
-    var background = 0  // Claude stopped, but still waits on this many background tasks
-    var transcript = ""  // Claude Code's transcript of the session (from the hook payload)
+    var background = 0  // background tasks still running after Stop
+    var transcript = ""
 
     var folder: String {
         let name = (projectDir as NSString).lastPathComponent
@@ -43,7 +39,6 @@ struct Session: Equatable {
     }
 }
 
-/// Splits a session file into its metadata line and JSON payload.
 private func splitFile(_ contents: Data) -> (fields: [String], payload: [String: Any])? {
     guard let text = String(data: contents, encoding: .utf8) else { return nil }
     let head: Substring, body: Substring
@@ -61,9 +56,7 @@ private func splitFile(_ contents: Data) -> (fields: [String], payload: [String:
 
 func parseSession(id: String, contents: Data, mtime: Date) -> Session? {
     guard let (f, payload) = splitFile(contents) else { return nil }
-    // "agents": Claude finished its turn but still waits on background work
-    // (agents, shells, monitors).
-    // That's still running, not done.
+    // "agents": the turn ended but background work continues, so still running.
     let waiting = f.first == "agents"
     guard let state = waiting ? .running : SessionState(rawValue: f.first ?? "") else { return nil }
     func field(_ i: Int) -> String { i < f.count ? f[i] : "" }
@@ -81,8 +74,7 @@ func parseSession(id: String, contents: Data, mtime: Date) -> Session? {
             message = q
         }
     case .running:
-        // Typed prompt: no detail (you know what you asked). Woken without a
-        // prompt (a subagent reported back): what Claude last said.
+        // Set only when woken without a typed prompt (a subagent reported back).
         message = payload["last_assistant_message"] as? String ?? ""
     case .idle:
         break
@@ -102,18 +94,14 @@ func parseSession(id: String, contents: Data, mtime: Date) -> Session? {
                    transcript: payload["transcript_path"] as? String ?? "")
 }
 
-/// Background work Claude is still waiting on, by Claude Code's type names,
-/// with how to say each. Agents, plus shells and monitors it started and is
-/// watching: Claude wakes up when they finish, so the session isn't done.
-/// Claude Code's own housekeeping (dreams, auto-mode scans) doesn't count.
+/// Background task types that keep a session running, and how to describe them.
+/// Claude Code's own housekeeping (dreams, auto-mode scans) is excluded.
 let backgroundWork: [String: String] = [
     "subagent": "Subagent working", "workflow": "Workflow running", "teammate": "Teammate working",
     "cloud session": "Cloud session running", "shell": "Shell running", "monitor": "Monitor running",
     "MCP task": "MCP task running",
 ]
 
-/// "Subagent working: Write the paper", "2 subagents working: …",
-/// "3 background tasks: …".
 func backgroundNote(_ tasks: [[String: Any]]) -> String {
     let what = tasks.compactMap { t -> String? in
         let desc = t["description"] as? String ?? "", cmd = t["command"] as? String ?? ""
@@ -130,14 +118,12 @@ func backgroundNote(_ tasks: [[String: Any]]) -> String {
     return what.isEmpty ? lead : lead + ": " + what.joined(separator: ", ")
 }
 
-/// The first prompt of a session (from its `.first` file), shortened.
 func parseLabel(_ contents: Data) -> String {
     snippet(typedText(splitFile(contents)?.payload["prompt"] as? String ?? ""), max: 40)
 }
 
-/// The part of a prompt you typed: pasted blocks dropped, and nothing at all
-/// for messages Claude Code delivers as prompts (a subagent reporting back,
-/// task notifications, slash-command output), which start with a tag.
+/// The typed part of a prompt: pasted blocks dropped, "" for tag-prefixed
+/// messages Claude Code injects (subagent reports, task notifications).
 func typedText(_ prompt: String) -> String {
     let t = prompt.replacingOccurrences(of: #"<pasted_content[^>]*>[\s\S]*?</pasted_content[^>]*>"#, with: " ",
                                         options: .regularExpression)
@@ -145,9 +131,8 @@ func typedText(_ prompt: String) -> String {
     return t.hasPrefix("<") ? "" : t
 }
 
-/// The most telling line of a markdown-ish message, without the markup. Skips
-/// headings, code blocks, tables and rules; a short opener like "Done." or
-/// "Here's what changed:" borrows the line after it.
+/// First meaningful line of a markdown message, without markup. A short opener
+/// ("Here's what changed:") borrows the next line.
 func snippet(_ text: String, max: Int = 160) -> String {
     func clean(_ raw: Substring) -> String {
         var line = raw.replacingOccurrences(of: "**", with: "").replacingOccurrences(of: "`", with: "")
@@ -206,7 +191,7 @@ func dot(for sessions: [Session]) -> Dot {
     return done > 0 ? .done(done) : .empty
 }
 
-/// Sessions that just became done or need you. Each one gets a card.
+/// Sessions that just became done or need you.
 func freshAlerts(old: [String: Session], new: [String: Session]) -> [Session] {
     new.values.filter { s in
         guard s.state == .done || s.state == .needs else { return false }
@@ -224,8 +209,7 @@ func panelOrder(_ sessions: [Session]) -> [Session] {
     }
 }
 
-/// Sessions that share a folder are told apart by their first prompt. Returns
-/// the label to show next to the folder name ("" when the folder is unique).
+/// Labels for sessions sharing a folder (their first prompt); "" otherwise.
 func rowLabels(_ sessions: [Session]) -> [String: String] {
     var count: [String: Int] = [:]
     for s in sessions { count[s.folder, default: 0] += 1 }
@@ -234,13 +218,12 @@ func rowLabels(_ sessions: [Session]) -> [String: String] {
     return labels
 }
 
-/// VS Code window titles look like "file.py — project". Does this one show `folder`?
+/// VS Code titles look like "file.py — project".
 func titleShowsFolder(_ title: String, _ folder: String) -> Bool {
     title.components(separatedBy: " — ").contains { $0.trimmingCharacters(in: .whitespaces) == folder }
 }
 
-/// VS Code logs "Extension host with pid N started" per window; that maps an
-/// extension host process to the `windowId` VS Code accepts on its URLs.
+/// Maps an extension host pid to its VS Code windowId, via the exthost logs.
 func vscodeWindowId(extHostPid: pid_t, logsRoot: URL, notBefore: Date? = nil) -> Int? {
     let fm = FileManager.default
     guard let runs = try? fm.contentsOfDirectory(atPath: logsRoot.path) else { return nil }
@@ -304,10 +287,8 @@ func bootTime() -> Date {
     return Date(timeIntervalSince1970: TimeInterval(tv.tv_sec))
 }
 
-/// When a session last showed signs of life: the newest timestamped entry in
-/// its transcript, or the newest file its subagents or tools wrote (they live
-/// in a folder next to it). Only the transcript's tail is read. Untimestamped
-/// bookkeeping lines that Claude Code appends to idle sessions don't count.
+/// Latest sign of life: the last timestamped transcript entry, or the newest
+/// file in the session's sidecar folder (subagents, tool results).
 func lastActivity(transcript path: String) -> Date? {
     guard !path.isEmpty else { return nil }
     var latest: Date?
@@ -336,13 +317,12 @@ func lastActivity(transcript path: String) -> Date? {
     return latest
 }
 
-// MARK: - Store: watches the sessions folder
+// MARK: - Store
 
 final class Store {
     let dir: URL
     private(set) var sessions: [String: Session] = [:]
-    /// Called on the main queue after every change, with the sessions that just
-    /// became done or need you.
+    /// Main queue. Receives the sessions that just became done or need you.
     var onChange: (([Session]) -> Void)?
 
     private var parsed: [String: (Date, Session)] = [:]
@@ -425,7 +405,6 @@ final class Store {
         return l
     }
 
-    /// kqueue tells us when a session's process exits; no polling.
     private func watchExits() {
         let pids = Set(sessions.values.map(\.pid).filter { $0 > 0 })
         for (pid, w) in exitWatchers where !pids.contains(pid) {
@@ -446,8 +425,6 @@ final class Store {
         }
     }
 
-    /// Clears a done (or needs-you) session from the list. It comes back as
-    /// running the next time you send it a prompt.
     func dismiss(_ id: String) {
         setIdle(id)
         onChange?([])
@@ -462,16 +439,11 @@ final class Store {
         sessions[id]?.state = .idle
     }
 
-    /// A turn can die without any hook firing (Esc before Claude replies, a
-    /// request lost while the Mac slept), leaving its session "running"
-    /// forever. When a session has said nothing for this long, in its
-    /// transcript or its subagents', it's idle. Sessions waiting on background
-    /// work are left alone: a build can be quiet for hours. Any later event
-    /// brings the session back.
+    /// A turn can end without any hook (Esc before a reply, a request lost in sleep).
+    /// Running sessions silent this long become idle; background waits are exempt.
     static let stallAfter: TimeInterval = 30 * 60
     private var stallChecked: [String: Date] = [:]
 
-    /// Runs when the panel opens, not on a timer. Returns whether anything changed.
     @discardableResult
     func expireStalled(now: Date = Date()) -> Bool {
         var changed = false
@@ -479,7 +451,6 @@ final class Store {
             && now.timeIntervalSince(s.since) >= Self.stallAfter {
             if let t = stallChecked[s.id], now.timeIntervalSince(t) < 5 * 60 { continue }
             stallChecked[s.id] = now
-            // No transcript to go on: leave it be rather than guess.
             guard let last = lastActivity(transcript: s.transcript.isEmpty ? findTranscript(s.id) : s.transcript),
                   now.timeIntervalSince(last) >= Self.stallAfter else { continue }
             setIdle(s.id)
@@ -489,8 +460,7 @@ final class Store {
         return changed
     }
 
-    /// ~/.claude/projects/<project>/<id>.jsonl, for session files written
-    /// before the hook kept the transcript path.
+    /// Fallback for state files without a transcript_path.
     private func findTranscript(_ id: String) -> String {
         let fm = FileManager.default
         let root = dir.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("projects")
@@ -524,7 +494,7 @@ enum Focus {
         switch s.host {
         case .terminal:
             guard let tty = ttyPath(s.pid) else { return activate(bundleId: "com.apple.Terminal") }
-            terminal.async {  // off the main thread, so the panel never freezes
+            terminal.async {
                 if terminalCall("jump", tty) == nil {
                     DispatchQueue.main.async { activate(bundleId: "com.apple.Terminal") }
                 }
@@ -538,8 +508,7 @@ enum Focus {
         }
     }
 
-    // VS Code terminal: the session's IDE port → the extension host listening on
-    // it → that window's id. The companion extension then shows the terminal.
+    // VS Code terminal: IDE port → listening extension host → windowId.
     private static func vscodeTerminal(_ s: Session) {
         let lock = ideLock(port: s.ssePort)
         DispatchQueue.global(qos: .userInitiated).async {
@@ -619,11 +588,8 @@ enum Focus {
 
     // MARK: Terminal.app
 
-    /// AppleScript for Terminal, compiled once. `jump` sends one-way messages
-    /// (no waiting for Terminal to answer each step) and finds the tab and
-    /// window with `whose` filters that Terminal evaluates itself. Measured:
-    /// Terminal is in front ~50 ms after the click, versus ~150 ms when the
-    /// script waited for a reply to every step.
+    /// One-way messages and `whose` filters: Terminal is in front ~50 ms after a
+    /// click, versus ~150 ms when waiting on each reply.
     private static let terminalSource = """
     on jump(t)
       ignoring application responses
@@ -649,9 +615,8 @@ enum Focus {
     end ping
     """
 
-    /// All AppleScript runs here, one call at a time.
     static let terminal = DispatchQueue(label: "blink.terminal", qos: .userInitiated)
-    private static var terminalScript: NSAppleScript?  // these two: only on `terminal`
+    private static var terminalScript: NSAppleScript?  // confined to `terminal`
     private static var terminalAllowed: pid_t = 0
     private static var lastWarm = Date.distantPast     // main thread
 
@@ -664,7 +629,6 @@ enum Focus {
         return terminalScript
     }
 
-    /// Calls a handler in the Terminal script. Run on `terminal`.
     static func terminalCall(_ handler: String, _ args: String...) -> NSAppleEventDescriptor? {
         guard let script = compiledTerminalScript() else { return nil }
         // 'ascr'/'psbr': "call a handler"; 'snam': its name (OpenScripting's ASRegistry.h).
@@ -680,12 +644,9 @@ enum Focus {
         return err == nil ? result : nil
     }
 
-    /// Keeps the Terminal jump fast. The first contact costs ~0.75 s (loading
-    /// AppleScript), and after ~30 s idle Terminal takes ~90 ms to answer
-    /// instead of ~5 ms (App Nap, permission re-checks). So this loads
-    /// AppleScript when a Terminal session appears, and pokes Terminal with a
-    /// no-op whenever the panel opens or you hover it, before you click.
-    /// At most every 2 s, and it never triggers a permission prompt.
+    /// First contact costs ~0.75 s, and an idle Terminal answers in ~90 ms instead
+    /// of ~5 ms, so preload AppleScript and ping Terminal before a likely click.
+    /// Throttled to 2 s; never prompts for permission.
     static func warmTerminal() {
         guard Date().timeIntervalSince(lastWarm) > 2,
               let app = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Terminal").first
@@ -736,7 +697,7 @@ enum Focus {
     }
 }
 
-// MARK: - Look: monochrome, Ollama-inspired
+// MARK: - Look
 
 extension NSColor {
     convenience init(hex: UInt32) {
@@ -770,9 +731,7 @@ private func makeLabel(_ text: String, size: CGFloat, weight: NSFont.Weight = .r
     return l
 }
 
-/// Menu bar images: ○ nothing waiting, ● done, ◐ needs you. A 15 pt circle
-/// in an 18 pt icon. Template images, so macOS tints them for the menu bar;
-/// drawn once, then cached.
+/// ○ nothing waiting, ● done, ◐ needs you. Template images, drawn once.
 enum DotImage {
     static let size: CGFloat = 18
 
@@ -852,13 +811,11 @@ class FirstClickButton: NSButton {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
-/// Respect System Settings → Accessibility → Display → Reduce motion.
 enum Motion {
     static var reduced: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
     static let easeOut = CAMediaTimingFunction(controlPoints: 0.16, 1, 0.3, 1)
 }
 
-/// A quiet text link ("Clear done") that darkens on hover.
 final class TextButton: FirstClickButton {
     var onPress: (() -> Void)?
     private let text: String
@@ -893,7 +850,6 @@ final class TextButton: FirstClickButton {
     override func mouseExited(with event: NSEvent) { style(hover: false) }
 }
 
-/// One session: glyph, folder, "done · 4m", and what Claude said.
 final class RowView: NSView {
     var onClick: (() -> Void)?
     var onDismiss: (() -> Void)?
@@ -914,7 +870,6 @@ final class RowView: NSView {
         didSet { if pressed != oldValue { paint(animated: true) } }
     }
 
-    /// `lines`: how many lines of Claude's message to show (the card shows 2).
     init(_ s: Session, label: String, now: Date, pulse: Bool, lines: Int = 1) {
         session = s
         detailText = s.message
@@ -927,7 +882,7 @@ final class RowView: NSView {
 
         let glyph = GlyphView(s.state, pulse: pulse)
         let name = makeLabel(s.folder, size: 13, weight: .medium, color: Palette.text)
-        if !label.isEmpty {  // folder in bold, then the first prompt in gray
+        if !label.isEmpty {
             let t = NSMutableAttributedString(string: s.folder, attributes: [
                 .font: NSFont.systemFont(ofSize: 13, weight: .medium), .foregroundColor: Palette.text])
             t.append(NSAttributedString(string: "  " + label, attributes: [
@@ -1006,7 +961,7 @@ final class RowView: NSView {
         "\(stateWord(s.state)) · \(ago(s.since, now: now))"
     }
 
-    /// Updates "running · 12m" in place (no rebuild, so hover state survives).
+    /// In place, so hover state survives.
     func refresh(now: Date) {
         time.stringValue = Self.timeText(session, now)
         describe(now: now)
@@ -1021,7 +976,6 @@ final class RowView: NSView {
 
     @objc private func dismissTapped() { onDismiss?() }
 
-    /// Hover and press tints fade rather than snap.
     private func paint(animated: Bool) {
         guard let layer else { return }
         var color = NSColor.clear.cgColor
@@ -1092,7 +1046,7 @@ final class CardView: NSView {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
-/// The borderless panel under the dot. It never takes focus from your app.
+/// The panel under the dot. Never takes focus.
 final class DropPanel: NSPanel {
     static let width: CGFloat = 320
     let card = CardView()
@@ -1130,10 +1084,8 @@ final class DropPanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 
-    /// Swaps in new content and sizes the panel to fit, centered under `anchor`
-    /// (the dot) just below the menu bar. Height changes glide while visible.
     func update(_ rows: [NSView], under anchor: NSWindow?, animate: Bool) {
-        // Keep the scroll position when the list refreshes under you.
+        // Preserve the scroll position across refreshes.
         let scrolled = stack.arrangedSubviews.compactMap { $0 as? ScrollingList }.first?.contentView.bounds.origin.y
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         for r in rows {
@@ -1171,10 +1123,9 @@ final class DropPanel: NSPanel {
 }
 
 private final class FlippedStack: NSStackView {
-    override var isFlipped: Bool { true }  // content starts at the top
+    override var isFlipped: Bool { true }
 }
 
-/// Fades the list into the card's background. Click-through.
 private final class FadeView: NSView {
     private let gradient = CAGradientLayer()
     override init(frame: NSRect) {
@@ -1191,13 +1142,12 @@ private final class FadeView: NSView {
             let bg = Palette.background.cgColor
             gradient.colors = [bg.copy(alpha: 0) ?? bg, bg]
         }
-        gradient.startPoint = CGPoint(x: 0.5, y: 1)  // clear at the top
-        gradient.endPoint = CGPoint(x: 0.5, y: 0)    // card color at the bottom
+        gradient.startPoint = CGPoint(x: 0.5, y: 1)
+        gradient.endPoint = CGPoint(x: 0.5, y: 0)
     }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
-/// Shows the first `visible` rows; the rest scroll (thin overlay scroller).
 final class ScrollingList: NSScrollView {
     init(_ rows: [NSView], width: CGFloat, visible: Int) {
         super.init(frame: .zero)
@@ -1219,7 +1169,6 @@ final class ScrollingList: NSScrollView {
             r.widthAnchor.constraint(equalToConstant: width).isActive = true
         }
         documentView = list
-        // With more rows than fit, let the next one peek out under a fade.
         let more = rows.count > visible
         let height = rows.prefix(visible).reduce(0) { $0 + ceil($1.fittingSize.height) } + (more ? 14 : 0)
         NSLayoutConstraint.activate([
@@ -1230,7 +1179,7 @@ final class ScrollingList: NSScrollView {
             heightAnchor.constraint(equalToConstant: height),
         ])
         if more {
-            addSubview(fade, positioned: .below, relativeTo: verticalScroller)  // framed in layout()
+            addSubview(fade, positioned: .below, relativeTo: verticalScroller)
             contentView.postsBoundsChangedNotifications = true
             NotificationCenter.default.addObserver(self, selector: #selector(scrolled),
                                                    name: NSView.boundsDidChangeNotification, object: contentView)
@@ -1242,7 +1191,7 @@ final class ScrollingList: NSScrollView {
 
     @objc private func scrolled() {
         guard fade.superview != nil, let doc = documentView, doc.frame.height > 0 else { return }
-        fade.isHidden = contentView.bounds.maxY >= doc.frame.height - 1  // at the bottom: no fade
+        fade.isHidden = contentView.bounds.maxY >= doc.frame.height - 1
     }
 
     override func layout() {
@@ -1262,7 +1211,6 @@ final class ScrollingList: NSScrollView {
     }
 }
 
-/// The panel's header: "2 done · 1 running", plus "Clear done" when useful.
 private func headerRow(_ text: String, onClear: (() -> Void)?, bottom: CGFloat) -> NSView {
     let v = NSView()
     v.translatesAutoresizingMaskIntoConstraints = false
@@ -1289,7 +1237,6 @@ private func headerRow(_ text: String, onClear: (() -> Void)?, bottom: CGFloat) 
     return v
 }
 
-/// A plain message (the first-run hint).
 func messageRow(_ title: String, _ detail: String) -> NSView {
     let v = NSView()
     v.translatesAutoresizingMaskIntoConstraints = false
@@ -1316,8 +1263,7 @@ func messageRow(_ title: String, _ detail: String) -> NSView {
 let firstRunHint = ("blink is running",
                     "Hover the dot to see your Claude Code sessions. Hold ⌘ and drag it to move it.")
 
-/// Rows for the card (`card` = the session ids to show) or, with `card: nil`,
-/// the full summary panel.
+/// Card rows for the `card` ids, or the full panel when `card` is nil.
 func panelRows(_ sessions: [String: Session], card: [String]?, now: Date,
                onOpen: @escaping (Session) -> Void, onDismiss: @escaping (Session) -> Void,
                onClearDone: (() -> Void)? = nil, paused: Bool = false) -> [NSView] {
@@ -1343,8 +1289,6 @@ func panelRows(_ sessions: [String: Session], card: [String]?, now: Date,
     return rows
 }
 
-/// The three dots on a menu-bar-colored strip: real size (2x pixels) on top,
-/// zoomed below. Writes dots-light.png and dots-dark.png.
 private func renderDotPreviews(to dir: String) {
     let faces: [(NSImage, String)] = [(DotImage.empty, ""), (DotImage.done, " 2"), (DotImage.needs, "")]
     for (look, bar, ink) in [("light", NSColor(hex: 0xECECEC), NSColor.black), ("dark", NSColor(hex: 0x262626), NSColor.white)] {
@@ -1379,8 +1323,7 @@ private func renderDotPreviews(to dir: String) {
     }
 }
 
-/// Developer aid: `blink --preview <dir>` renders the card, the panel and
-/// the first-run hint, light and dark, to PNGs (no screen recording needed).
+/// `blink --preview <dir>` renders the UI to PNGs, light and dark.
 func renderPreviews(to dir: String) {
     renderDotPreviews(to: dir)
     let now = Date()
@@ -1469,9 +1412,7 @@ final class Controller: NSObject {
     private var mouseMonitor: Any?
     private var clickMonitor: Any?
 
-    /// Pinned by a click: stays open with the dot highlighted, and a click
-    /// anywhere else closes it, like a menu. The click watcher exists only
-    /// while pinned.
+    /// Pinned by a click: stays open until you click elsewhere, like a menu.
     private var pinned = false {
         didSet {
             guard pinned != oldValue else { return }
@@ -1491,7 +1432,7 @@ final class Controller: NSObject {
 
     static let cardSeconds = 6.0
     static let maxCardRows = 3
-    static let hoverDelay = 0.12  // passing over the dot on the way elsewhere shouldn't flash the panel
+    static let hoverDelay = 0.12  // passing over the dot shouldn't flash the panel
 
     init(store: Store) {
         self.store = store
@@ -1508,9 +1449,8 @@ final class Controller: NSObject {
             b.addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
                                              owner: self))
         }
-        // macOS 26: Control Center draws menu bar icons and forwards clicks but
-        // not hover. Watch mouse movement instead; it's delivered only while the
-        // mouse moves, and each event is one rectangle check.
+        // macOS 26: Control Center hosts menu bar icons and forwards clicks but not
+        // hover, so watch mouse movement instead.
         mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: .mouseMoved) { [weak self] _ in
             guard let self else { return }
             self.setOverDot(self.mouseOnDot)
@@ -1518,7 +1458,7 @@ final class Controller: NSObject {
         panel.card.onHover = { [weak self] inside in
             guard let self else { return }
             self.overPanel = inside
-            if inside { self.warmTerminalIfNeeded() }  // you're about to click
+            if inside { self.warmTerminalIfNeeded() }
             if !inside { self.scheduleHide(after: self.mode == .summary ? 0.3 : 1.5) }
         }
         store.onChange = { [weak self] fresh in self?.storeChanged(fresh) }
@@ -1542,7 +1482,7 @@ final class Controller: NSObject {
         case .needs: b.image = DotImage.needs; b.title = ""
         case .done(let n): b.image = DotImage.done; b.title = " \(n)"
         }
-        b.appearsDisabled = Prefs.paused  // a dimmed dot says "popups paused"
+        b.appearsDisabled = Prefs.paused
         b.setAccessibilityLabel("blink: " + summaryLine(all) + (Prefs.paused ? ", popups paused" : ""))
     }
 
@@ -1589,7 +1529,6 @@ final class Controller: NSObject {
         case .summary:
             render()
         case .card, .hint, .hidden:
-            // Cards only show sessions that still need attention.
             cardIds = cardIds.filter { id in
                 guard let s = store.sessions[id] else { return false }
                 return s.state == .done || s.state == .needs
@@ -1608,7 +1547,6 @@ final class Controller: NSObject {
 
     // MARK: Panel
 
-    /// First launch only: point at the dot once, so it isn't a mystery.
     func showHint() {
         guard mode == .hidden else { return }
         show(.hint)
@@ -1636,7 +1574,7 @@ final class Controller: NSObject {
         }
         ticker?.invalidate()
         ticker = nil
-        if m == .summary {  // keep "running · 12m" honest while the panel is open
+        if m == .summary {
             ticker = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
                 self?.panel.refreshTimes(Date())
             }
@@ -1646,8 +1584,7 @@ final class Controller: NSObject {
     private func scheduleHide(after delay: TimeInterval) {
         hideWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            // Trust where the pointer is, not enter/exit bookkeeping: a fast
-            // move can skip an exit event.
+            // Trust the pointer's position: a fast move can skip an exit event.
             guard let self, !self.pinned, !self.mouseOnDot, !self.mouseOnPanel else { return }
             self.hide()
         }
@@ -1673,7 +1610,7 @@ final class Controller: NSObject {
         }, completionHandler: { [weak self] in
             guard let self, self.mode == .hidden else { return }
             self.panel.orderOut(nil)
-            self.panel.update([], under: nil, animate: false)  // drop views (and pulse animations) while hidden
+            self.panel.update([], under: nil, animate: false)  // drop views and animations while hidden
         })
     }
 
@@ -1693,7 +1630,7 @@ final class Controller: NSObject {
     }
 
     private func open(_ s: Session) {
-        if !pinned { hide() }  // the panel goes first, so the click feels instant
+        if !pinned { hide() }  // hide first so the click feels instant
         Focus.open(s)
         if s.state == .done { store.dismiss(s.id) }
     }
@@ -1749,13 +1686,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller = Controller(store: store)
         store.start()
         self.store = store
-        if first {  // let the status item settle into the menu bar first
+        if first {  // let the status item settle first
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.controller?.showHint() }
         }
     }
 
-    /// Defaults from the spec: launch at login on, and ask once for
-    /// Accessibility (used only to read VS Code's front window title).
+    /// First launch: launch at login on; ask once for Accessibility (VS Code window titles).
     private func firstRun() -> Bool {
         let d = UserDefaults.standard
         guard !d.bool(forKey: "setupDone") else { return false }

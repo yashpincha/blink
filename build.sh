@@ -13,9 +13,8 @@ if [ -z "${SDK:-}" ]; then
   else SDK=$(xcrun --show-sdk-path); fi
 fi
 FLAGS="-sdk $SDK -target $(uname -m)-apple-macos13.0"
-# Some Command Line Tools updates leave a stray bridging.modulemap next to
-# module.modulemap; both define SwiftBridging and nothing compiles. Hide the
-# stray copy from this build only (nothing on the system changes).
+# Some CLT updates leave a stray bridging.modulemap that redefines
+# SwiftBridging; hide it from this build only.
 if [ -f "$CLT/usr/include/swift/bridging.modulemap" ] && [ -f "$CLT/usr/include/swift/module.modulemap" ]; then
   mkdir -p build && : > build/empty.modulemap
   printf '{"version":0,"case-sensitive":"false","roots":[{"type":"file","name":"%s","external-contents":"%s"}]}' \

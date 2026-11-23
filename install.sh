@@ -1,6 +1,5 @@
 #!/bin/sh
-# Install blink: build the app, add the Claude Code hooks, add the VS Code helper.
-# Safe to re-run (that's also how you update).
+# Installs or updates blink. Safe to re-run.
 set -eu
 cd "$(dirname "$0")"
 APPS="$HOME/Applications"
@@ -10,9 +9,7 @@ say() { printf '\033[1m==> %s\033[0m\n' "$*"; }
 
 command -v jq >/dev/null || { echo "blink needs jq (macOS 15+ ships it; otherwise: brew install jq)" >&2; exit 1; }
 
-# 1. A local code-signing identity. macOS ties Accessibility and Automation
-#    permissions to the app's signature; a stable identity keeps them across
-#    rebuilds. It lives only in your login keychain.
+# 1. Local signing identity: keeps macOS permissions across rebuilds.
 if ! security find-identity -p codesigning 2>/dev/null | grep -q '"blink"'; then
   say "Creating a local signing certificate in your login keychain"
   tmp=$(mktemp -d)
@@ -46,19 +43,19 @@ rm -rf "$APPS/blink.app"
 cp -R build/blink.app "$APPS/"
 echo "    $APPS/blink.app"
 
-# 3. The hook script, and the hooks in Claude Code's settings (backup first).
+# 3. Hook script and settings.json hooks (original backed up once).
 say "Adding Claude Code hooks"
 mkdir -p "$DATA/sessions"
 cp hooks/hook.sh "$DATA/hook.sh"
 chmod +x "$DATA/hook.sh"
 mkdir -p "$(dirname "$SETTINGS")"
 [ -s "$SETTINGS" ] || echo '{}' > "$SETTINGS"
-[ -f "$SETTINGS.bak-blink" ] || cp "$SETTINGS" "$SETTINGS.bak-blink"  # keep the pre-blink original
+[ -f "$SETTINGS.bak-blink" ] || cp "$SETTINGS" "$SETTINGS.bak-blink"
 jq -f scripts/hooks-add.jq "$SETTINGS" > "$SETTINGS.tmp-blink"
 mv "$SETTINGS.tmp-blink" "$SETTINGS"
 echo "    $SETTINGS (original saved as settings.json.bak-blink)"
 
-# 4. The VS Code helper that focuses the exact terminal tab.
+# 4. VS Code helper: focuses the exact terminal tab.
 if command -v code >/dev/null; then
   say "Installing the VS Code helper extension"
   ./build.sh vsix >/dev/null

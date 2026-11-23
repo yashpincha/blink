@@ -1,21 +1,15 @@
 #!/bin/sh
-# blink hook: keeps one tiny file per Claude Code session up to date.
-# Claude Code runs it in the background (async) on a few lifecycle events.
-# The blink app watches the folder and does everything else.
+# blink hook: keeps ~/.claude/blink/sessions/<id>.state current. Runs async.
 #
-#   hook.sh running   UserPromptSubmit                 you sent a prompt
-#   hook.sh done      Stop, StopFailure                Claude finished its turn (or "agents" if it
-#                                                      still waits on background agents, shells or monitors)
-#   hook.sh needs     Notification (permission prompt, question), PreToolUse AskUserQuestion
-#   hook.sh tool      PostToolUse                      back to "running" from needs, done or idle:
-#                                                      Claude (or a subagent) is using tools, even
-#                                                      without a typed prompt (a subagent reported back)
-#   hook.sh idle      Notification idle_prompt         clears a stale state after an interrupt
-#                                                      (never while background work goes on)
-#   hook.sh interrupt PostToolUseFailure               you pressed Esc mid-tool: no Stop follows
-#   hook.sh end       SessionEnd                       forget the session
+#   running    UserPromptSubmit
+#   done       Stop, StopFailure ("agents" while background work continues)
+#   needs      Notification (permission, question), PreToolUse AskUserQuestion
+#   tool       PostToolUse: needs, done or idle → running
+#   idle       Notification idle_prompt: running or needs → idle
+#   interrupt  PostToolUseFailure: Esc mid-tool → idle
+#   end        SessionEnd
 #
-# File format: one tab-separated metadata line, then the event's JSON payload.
+# File: one tab-separated metadata line, then the event's JSON payload.
 
 sid=$CLAUDE_CODE_SESSION_ID
 [ -n "$sid" ] || exit 0
@@ -27,7 +21,7 @@ case $1 in
     rm -f "$f" "$dir/$sid.first"
     exit 0 ;;
   tool|idle|interrupt)
-    # Cheap guard (shell builtins only): most tool calls don't change anything.
+    # Builtins only: this runs on every tool call.
     [ -f "$f" ] || exit 0
     IFS= read -r head < "$f"
     case "$1:$head" in
@@ -39,10 +33,8 @@ case $1 in
       *) exit 0 ;;
     esac ;;
   done)
-    # Claude Code lists running background tasks in the Stop payload. If
-    # Claude is still waiting on any (agents, or shells and monitors it's
-    # watching; it wakes up when they finish), the session isn't done yet.
-    # Claude Code's own housekeeping (dreams, auto-mode scans) doesn't count.
+    # Background work Claude waits on keeps the session running.
+    # Claude Code's housekeeping tasks (dream, auto-mode scan) don't count.
     payload=$(cat)
     case $payload in
       *'"type":"subagent"'*|*'"type":"workflow"'*|*'"type":"teammate"'*|*'"type":"cloud session"'*| \
@@ -53,7 +45,7 @@ case $1 in
   *) exit 0 ;;
 esac
 
-# Interactive sessions only (terminal or VS Code); skip `claude -p` and SDK runs.
+# Interactive sessions only; skip `claude -p` and SDK runs.
 case $CLAUDE_CODE_ENTRYPOINT in cli|claude-vscode) ;; *) exit 0 ;; esac
 
 [ -d "$dir" ] || mkdir -p "$dir"
@@ -64,14 +56,13 @@ tmp="$dir/.$sid.$$"
   case $1 in
     done) printf '%s\n' "$payload" ;;
     running|needs) cat ;;
-    *) tail -n +2 "$f" ;;  # tool, idle, interrupt: keep what Claude last said
+    *) tail -n +2 "$f" ;;  # keep the previous payload
   esac
 } > "$tmp" && mv -f "$tmp" "$f"
 
-# Remember the first prompt you typed; it labels sessions that share a folder.
-# Skip messages Claude Code delivers as prompts (a subagent reporting back,
-# task notifications), which start with a tag; a pasted block is still yours.
-typed() { # typed <file>: is line 2's prompt something you typed?
+# The first typed prompt labels sessions that share a folder. Tag-prefixed
+# prompts are injected by Claude Code; pasted content counts as typed.
+typed() {
   [ -f "$1" ] || return 1
   p=
   { IFS= read -r _; IFS= read -r p; } < "$1"  # the payload has no trailing newline

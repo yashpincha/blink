@@ -1,6 +1,5 @@
-// blink companion: loads only when blink opens
-//   vscode://yashpincha.blink/focus?pid=<claude pid>&pid=<its shell pid>…
-// and shows the integrated terminal running that process. Nothing else.
+// Handles vscode://yashpincha.blink/focus?pid=…&pid=…: shows the integrated
+// terminal running one of those processes.
 const vscode = require('vscode');
 
 exports.activate = (context) => {

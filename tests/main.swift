@@ -44,9 +44,15 @@ let waiting = parseSession(
     id: "w", contents: file("agents\t1\tcli\tvscode\t\t\t/p/proj",
                             #"{"last_assistant_message":"Kicked off 2 agents.","background_tasks":[{"id":"a1","type":"subagent","status":"running","agent_type":"Explore"},{"id":"w1","type":"workflow","status":"running"},{"id":"b1","type":"shell","status":"running","command":"npm run dev"}]}"#),
     mtime: t0)
-check(waiting?.state == .running && waiting?.agents == 2,
-      "stopped with background agents: running, 2 agents (shell not counted)")
-check(waiting?.message == "2 subagents working", "agents note: \(waiting?.message ?? "nil")")
+check(waiting?.state == .running && waiting?.background == 3,
+      "stopped with a subagent, a workflow and a watched shell: running, 3 tasks")
+check(waiting?.message == "3 background tasks: npm run dev", "background note: \(waiting?.message ?? "nil")")
+func note(_ json: String) -> String { backgroundNote((try! JSONSerialization.jsonObject(with: Data(json.utf8))) as! [[String: Any]]) }
+check(note(#"[{"type":"subagent","description":"Draft intro"},{"type":"subagent","description":"Draft methods"}]"#)
+      == "2 subagents working: Draft intro, Draft methods", "two subagents")
+check(note(#"[{"type":"shell","description":"Watch the docker build","command":"until …"}]"#)
+      == "Shell running: Watch the docker build", "one watched shell")
+check(note(#"[{"type":"monitor","command":"tail -f build.log"}]"#) == "Monitor running: tail -f build.log", "monitor, command as fallback")
 let paper = parseSession(
     id: "p", contents: file("agents\t1\tcli\tvscode\t\t\t/p/aw",
                             #"{"background_tasks":[{"id":"a1","type":"subagent","status":"running","description":"Write the proj paper"}]}"#),

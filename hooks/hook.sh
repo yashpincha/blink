@@ -4,14 +4,14 @@
 # The blink app watches the folder and does everything else.
 #
 #   hook.sh running   UserPromptSubmit                 you sent a prompt
-#   hook.sh done      Stop, StopFailure                Claude finished its turn (or, if
-#                                                      background agents still work, "agents")
+#   hook.sh done      Stop, StopFailure                Claude finished its turn (or "agents" if it
+#                                                      still waits on background agents, shells or monitors)
 #   hook.sh needs     Notification (permission prompt, question), PreToolUse AskUserQuestion
 #   hook.sh tool      PostToolUse                      back to "running" from needs, done or idle:
 #                                                      Claude (or a subagent) is using tools, even
 #                                                      without a typed prompt (a subagent reported back)
 #   hook.sh idle      Notification idle_prompt         clears a stale state after an interrupt
-#                                                      (never while agents still work)
+#                                                      (never while background work goes on)
 #   hook.sh interrupt PostToolUseFailure               you pressed Esc mid-tool: no Stop follows
 #   hook.sh end       SessionEnd                       forget the session
 #
@@ -39,11 +39,14 @@ case $1 in
       *) exit 0 ;;
     esac ;;
   done)
-    # Claude Code lists running background tasks in the Stop payload. If any
-    # are agents (not shells or monitors), the session isn't done yet.
+    # Claude Code lists running background tasks in the Stop payload. If
+    # Claude is still waiting on any (agents, or shells and monitors it's
+    # watching; it wakes up when they finish), the session isn't done yet.
+    # Claude Code's own housekeeping (dreams, auto-mode scans) doesn't count.
     payload=$(cat)
     case $payload in
-      *'"type":"subagent"'*|*'"type":"workflow"'*|*'"type":"teammate"'*|*'"type":"cloud session"'*) state=agents ;;
+      *'"type":"subagent"'*|*'"type":"workflow"'*|*'"type":"teammate"'*|*'"type":"cloud session"'*| \
+      *'"type":"shell"'*|*'"type":"monitor"'*|*'"type":"MCP task"'*) state=agents ;;
       *) state=done ;;
     esac ;;
   running|needs) state=$1 ;;

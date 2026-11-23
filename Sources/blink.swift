@@ -27,7 +27,7 @@ struct Session: Equatable {
     var message = ""
     var label = ""
     var since = Date()
-    var agents = 0  // Claude stopped, but this many background agents still work
+    var background = 0  // Claude stopped, but still waits on this many background tasks
 
     var folder: String {
         let name = (projectDir as NSString).lastPathComponent
@@ -60,7 +60,8 @@ private func splitFile(_ contents: Data) -> (fields: [String], payload: [String:
 
 func parseSession(id: String, contents: Data, mtime: Date) -> Session? {
     guard let (f, payload) = splitFile(contents) else { return nil }
-    // "agents": Claude finished its turn while background agents still work.
+    // "agents": Claude finished its turn but still waits on background work
+    // (agents, shells, monitors).
     // That's still running, not done.
     let waiting = f.first == "agents"
     guard let state = waiting ? .running : SessionState(rawValue: f.first ?? "") else { return nil }
@@ -87,23 +88,45 @@ func parseSession(id: String, contents: Data, mtime: Date) -> Session? {
     }
     var dir = field(6)
     if dir.isEmpty { dir = payload["cwd"] as? String ?? "" }
-    var agents = 0
+    var background = 0
     if waiting {
         let tasks = (payload["background_tasks"] as? [[String: Any]] ?? [])
-            .filter { agentTaskTypes.contains($0["type"] as? String ?? "") }
-        agents = max(1, tasks.count)
-        let what = tasks.compactMap { $0["description"] as? String }.filter { !$0.isEmpty }
-        let lead = agents == 1 ? "Subagent working" : "\(agents) subagents working"
-        message = what.isEmpty ? lead : lead + ": " + what.joined(separator: ", ")
+            .filter { backgroundWork[$0["type"] as? String ?? ""] != nil }
+        background = max(1, tasks.count)
+        message = backgroundNote(tasks)
     }
     return Session(id: id, state: state, pid: pid_t(field(1)) ?? 0, entry: field(2), term: field(3),
                    ssePort: field(4), bundleId: field(5), projectDir: dir,
-                   message: snippet(message), since: mtime, agents: agents)
+                   message: snippet(message), since: mtime, background: background)
 }
 
-/// Background task types that are agents at work. Shells and monitors aren't:
-/// a dev server left running shouldn't keep a session from being done.
-let agentTaskTypes: Set<String> = ["subagent", "workflow", "teammate", "cloud session"]
+/// Background work Claude is still waiting on, by Claude Code's type names,
+/// with how to say each. Agents, plus shells and monitors it started and is
+/// watching: Claude wakes up when they finish, so the session isn't done.
+/// Claude Code's own housekeeping (dreams, auto-mode scans) doesn't count.
+let backgroundWork: [String: String] = [
+    "subagent": "Subagent working", "workflow": "Workflow running", "teammate": "Teammate working",
+    "cloud session": "Cloud session running", "shell": "Shell running", "monitor": "Monitor running",
+    "MCP task": "MCP task running",
+]
+
+/// "Subagent working: Write the paper", "2 subagents working: …",
+/// "3 background tasks: …".
+func backgroundNote(_ tasks: [[String: Any]]) -> String {
+    let what = tasks.compactMap { t -> String? in
+        let desc = t["description"] as? String ?? "", cmd = t["command"] as? String ?? ""
+        let d = desc.isEmpty ? cmd : desc
+        return d.isEmpty ? nil : d
+    }
+    let types = Set(tasks.map { $0["type"] as? String ?? "" })
+    let lead: String
+    switch tasks.count {
+    case 0: lead = "Working in the background"
+    case 1: lead = backgroundWork[tasks[0]["type"] as? String ?? ""] ?? "Working in the background"
+    default: lead = types == ["subagent"] ? "\(tasks.count) subagents working" : "\(tasks.count) background tasks"
+    }
+    return what.isEmpty ? lead : lead + ": " + what.joined(separator: ", ")
+}
 
 /// The first prompt of a session (from its `.first` file), shortened.
 func parseLabel(_ contents: Data) -> String {
@@ -1294,7 +1317,7 @@ func renderPreviews(to dir: String) {
                 since: now.addingTimeInterval(-60)),
         Session(id: "4", state: .running, projectDir: "/x/sim",
                 message: "Subagent working: Write the proj paper", label: "Plot the phase diagram",
-                since: now.addingTimeInterval(-95), agents: 1),
+                since: now.addingTimeInterval(-95), background: 1),
         Session(id: "5", state: .done, projectDir: "/x/website", message: "Shipped the new landing page copy.",
                 since: now.addingTimeInterval(-3 * 3600)),
     ]

@@ -67,7 +67,7 @@ Claude Code ──hooks──▶ ~/.claude/blink/sessions/<id>.state ──watch
 | Hook | Writes |
 | --- | --- |
 | `UserPromptSubmit` | `running` |
-| `Stop`, `StopFailure` | `done`, with Claude's last message |
+| `Stop`, `StopFailure` | `done`, with Claude's last message. If Claude still waits on background work (subagents, workflows, or shells and monitors it's watching), the session stays running and says what it's waiting on |
 | `Notification` (`permission_prompt`, `elicitation_*`, `agent_needs_input`), `PreToolUse` `AskUserQuestion` | `needs` |
 | `PostToolUse` | `running` again after `needs`, `done` or `idle`: Claude or a subagent is using tools, even with no typed prompt (a subagent reported back) |
 | `Notification` `idle_prompt` | `idle`, which clears a stale state after you interrupt Claude |

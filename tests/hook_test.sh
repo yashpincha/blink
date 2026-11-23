@@ -52,8 +52,12 @@ run done '{"last_assistant_message":"Started.","background_tasks":[{"id":"a1","t
 ok 'head1 | grep -q "^agents	" && grep -q background_tasks "$D/s1.state"' "Stop with a background subagent: agents"
 run idle '{"notification_type":"idle_prompt"}'
 ok 'head1 | grep -q "^agents	"' "idle_prompt ignored while agents work"
-run done '{"last_assistant_message":"Server up.","background_tasks":[{"id":"b1","type":"shell","status":"running"}]}'
-ok 'head1 | grep -q "^done	"' "background shell only: done"
+run done '{"last_assistant_message":"Watching the build.","background_tasks":[{"id":"b1","type":"shell","status":"running"}]}'
+ok 'head1 | grep -q "^agents	"' "background shell Claude watches: still running"
+run done '{"last_assistant_message":"Tailing logs.","background_tasks":[{"id":"m1","type":"monitor","status":"running"}]}'
+ok 'head1 | grep -q "^agents	"' "monitor: still running"
+run done '{"last_assistant_message":"Done.","background_tasks":[{"id":"d1","type":"dream","status":"running"}]}'
+ok 'head1 | grep -q "^done	"' "Claude Code housekeeping only: done"
 run done '{"last_assistant_message":"All agents back.","background_tasks":[]}'
 ok 'head1 | grep -q "^done	" && grep -q "All agents back." "$D/s1.state"' "agents finished: done"
 
